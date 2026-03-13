@@ -1,0 +1,30 @@
+# Binaries
+/lb
+/backend
+*.exe
+*.out
+
+# Metrics output
+*.json
+*.csv
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
+terraform/*.tfvars
+terraform/crash.log
+terraform/crash.*.log
+
+# Python / Locust
+__pycache__/
+*.py[cod]
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

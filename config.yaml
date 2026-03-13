@@ -1,0 +1,28 @@
+# Load balancer configuration.
+# Backend endpoints use Docker/ECS service-discovery hostnames.
+# The redis.addr field is overridden at runtime by the REDIS_ADDR
+# environment variable injected via the ECS task definition.
+
+load_balancer:
+  port: 8080
+  timeout: 5s
+
+route:
+  # Changeable per experiment: round-robin | least-connections | weighted
+  policy: "round-robin"
+  backends:
+    - endpoint: "http://backend-1:8080"
+      weight: 50
+    - endpoint: "http://backend-2:8080"
+      weight: 30
+    - endpoint: "http://backend-3:8080"
+      weight: 20
+
+health_check:
+  interval: 10s
+  timeout: 5s
+
+redis:
+  addr: "redis:6379"
+  password: ""
+  db: 0
