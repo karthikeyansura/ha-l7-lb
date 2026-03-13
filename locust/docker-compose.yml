@@ -1,0 +1,20 @@
+# Distributed Locust load testing setup.
+# Master: runs the web UI on port 8089 and coordinates workers.
+# Worker: executes the actual HTTP requests. Scale with --scale worker=N.
+#
+# The --class-picker flag enables per-experiment class selection in the UI.
+# Point the Locust host field at the NLB DNS name (AWS) or localhost:8080 (local).
+services:
+  master:
+    image: locustio/locust
+    ports:
+      - "8089:8089"
+    volumes:
+      - ./:/mnt/locust
+    command: -f /mnt/locust/locustfile.py --master --class-picker
+
+  worker:
+    image: locustio/locust
+    volumes:
+      - ./:/mnt/locust
+    command: -f /mnt/locust/locustfile.py --worker --master-host master
