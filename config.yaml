@@ -1,5 +1,5 @@
 # Load balancer configuration.
-# Backend endpoints use Docker/ECS service-discovery hostnames.
+# Backend endpoints use AWS Cloud Map service-discovery DNS.
 # The redis.addr field is overridden at runtime by the REDIS_ADDR
 # environment variable injected via the ECS task definition.
 
@@ -11,12 +11,8 @@ route:
   # Changeable per experiment: round-robin | least-connections | weighted
   policy: "round-robin"
   backends:
-    - endpoint: "http://backend-1:8080"
-      weight: 50
-    - endpoint: "http://backend-2:8080"
-      weight: 30
-    - endpoint: "http://backend-3:8080"
-      weight: 20
+    - endpoint: "http://api.internal:8080"
+      weight: 100
 
 health_check:
   interval: 10s

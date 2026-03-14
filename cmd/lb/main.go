@@ -11,20 +11,22 @@
 //
 // Startup sequence:
 //  1. Load config (YAML + REDIS_ADDR env override).
-//  2. Parse backend URLs and instantiate the routing algorithm.
-//  3. Create InMemory shared state (all backends start healthy).
-//  4. Connect to Redis; abort if unreachable.
-//  5. Sync local state from Redis (handles LB restart scenarios).
-//  6. Start Redis Pub/Sub watcher (background goroutine).
-//  7. Start health checker (background goroutine).
-//  8. Start metrics time-series recorder (every 5s, background goroutine).
-//  9. Start metrics HTTP server (port+1000, background goroutine).
+//  2. Parse base target URL and instantiate the routing algorithm.
+//  3. Create empty InMemory shared state.
+//  4. Start Dynamic DNS Discovery in a background goroutine to populate the state.
+//  5. Connect to Redis; abort if unreachable.
+//  6. Sync local state from Redis (handles LB restart scenarios).
+//  7. Start Redis Pub/Sub watcher (background goroutine).
+//  8. Start health checker (background goroutine).
+//  9. Start metrics time-series recorder (every 5s, background goroutine).
 //
-// 10. Register graceful shutdown handler (SIGINT/SIGTERM).
-// 11. Start the main HTTP server (foreground, blocks until exit).
+// 10. Start metrics HTTP server (port+1000, background goroutine).
+// 11. Register graceful shutdown handler (SIGINT/SIGTERM).
+// 12. Start the main HTTP server (foreground, blocks until exit).
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -39,6 +41,7 @@ import (
 
 	"github.com/karthikeyansura/ha-l7-lb/internal/algorithms"
 	"github.com/karthikeyansura/ha-l7-lb/internal/config"
+	"github.com/karthikeyansura/ha-l7-lb/internal/discovery"
 	"github.com/karthikeyansura/ha-l7-lb/internal/health"
 	"github.com/karthikeyansura/ha-l7-lb/internal/metrics"
 	"github.com/karthikeyansura/ha-l7-lb/internal/proxy"
@@ -74,26 +77,27 @@ func main() {
 		return
 	}
 
-	// Parse backend URLs from config.
-	backends := make([]url.URL, 0, len(route.Backends))
-	weights := make([]int, 0, len(route.Backends))
-	for _, backend := range route.Backends {
-		backendURL, err := url.Parse(backend.Endpoint)
-		if err != nil {
-			slog.Error("Invalid backend", "backend", backend, "error", err.Error())
-			continue
-		}
-		backends = append(backends, *backendURL)
-		weights = append(weights, backend.Weight)
+	// Extract the base Cloud Map target from the first configured backend
+	if len(route.Backends) == 0 {
+		slog.Error("At least one backend must be configured to extract the discovery domain.")
+		return
 	}
-
-	if len(backends) == 0 {
-		slog.Error("No backends configured")
+	baseTarget, err := url.Parse(route.Backends[0].Endpoint)
+	if err != nil {
+		slog.Error("Invalid backend endpoint URL format", "error", err)
 		return
 	}
 
-	slog.Info("Initializing servers", "backends", backends, "weights", weights)
-	sharedState := repository.NewInMemory(backends, weights)
+	hostname := baseTarget.Hostname()
+	port := baseTarget.Port()
+	scheme := baseTarget.Scheme
+	defaultWeight := route.Backends[0].Weight
+
+	// Initialize with an empty pool; the DNS worker will populate it immediately.
+	sharedState := repository.NewInMemory([]url.URL{}, []int{})
+
+	// Start Dynamic DNS Discovery in a background goroutine
+	discovery.StartDNSWatcher(context.Background(), hostname, port, scheme, defaultWeight, sharedState)
 
 	// Redis is mandatory for distributed state coordination.
 	if config.AppConfig.RedisConfig == nil {
@@ -156,7 +160,7 @@ func main() {
 	addr := fmt.Sprintf(":%d", config.AppConfig.LoadBalancer.Port)
 
 	slog.Info(fmt.Sprintf("Load balancer starting on %s with %s policy", addr, route.Policy))
-	slog.Info(fmt.Sprintf("Backends: %v", route.Backends))
+	slog.Info(fmt.Sprintf("Base discovery target: %s", route.Backends[0].Endpoint))
 	slog.Info(fmt.Sprintf("Metrics available at http://localhost:%d/metrics", config.AppConfig.LoadBalancer.Port+1000))
 
 	log.Fatal(http.ListenAndServe(addr, lb))
