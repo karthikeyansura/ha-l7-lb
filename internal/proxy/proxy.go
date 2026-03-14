@@ -14,7 +14,7 @@
 //     b. Select a different backend from the remaining healthy set.
 //     c. Retry once on the new backend.
 //  8. On failure for non-idempotent methods (POST, PATCH):
-//     return 504 Gateway Timeout immediately. No retry is attempted
+//     fall through to a 504 Gateway Timeout. No retry is attempted
 //     because re-executing a non-idempotent request could produce
 //     duplicate side effects (e.g., double order creation).
 //
@@ -238,18 +238,12 @@ func (lb *ReverseProxy) selectDifferent(backends []*repository.ServerState, excl
 	return &target
 }
 
-// isIdempotent returns true for HTTP methods that are safe to retry
-// without risk of duplicate side effects. Per RFC 7231:
-//   - GET: safe and idempotent.
-//   - PUT: idempotent (repeated PUTs produce the same resource state).
-//   - DELETE: idempotent (deleting an already-deleted resource is a no-op).
-//   - POST, PATCH: NOT idempotent (retrying may create duplicate resources).
+// isIdempotent returns true for methods safe to retry (GET, PUT, DELETE).
 func isIdempotent(method string) bool {
 	return method == "GET" || method == "PUT" || method == "DELETE"
 }
 
-// TimeoutError is a typed error for distinguishing context deadline
-// exceeded from other transport failures in the proxy error path.
+// TimeoutError indicates a backend request exceeded the 2-second deadline.
 type TimeoutError struct {
 	URL string
 }
