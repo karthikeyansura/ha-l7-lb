@@ -215,7 +215,7 @@ func startMetricsServer(collector *metrics.Collector, pool repository.SharedStat
 		for i, b := range backends {
 			statuses[i] = BackendStatus{
 				URL:       b.ServerURL.String(),
-				Healthy:   b.Healthy,
+				Healthy:   b.IsHealthy(),
 				LastCheck: b.LastCheck.Format(time.RFC3339),
 			}
 		}

@@ -216,32 +216,34 @@ func (lb *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, des
 	return nil
 }
 
-// selectDifferent constructs a temporary pool excluding the failed backend
-// and runs the algorithm against it. This guarantees the retry targets
-// a different server. Returns nil if no alternative exists (single-backend pool).
-func (lb *ReverseProxy) selectDifferent(backends []*repository.ServerState, exclude *url.URL, req *http.Request) *url.URL {
-	var filtered []url.URL
-	var filteredWeights []int
+// selectDifferent picks a retry target from the healthy backends, excluding
+// the one that just failed. Instead of creating an ephemeral pool (which
+// would reset connection counters and break least-connections), this selects
+// directly from the existing ServerState pointers, preserving live state.
+func (lb *ReverseProxy) selectDifferent(backends []*repository.ServerState, exclude *url.URL, _ *http.Request) *url.URL {
+	var candidates []*repository.ServerState
 	for _, b := range backends {
-		if b.ServerURL.String() != exclude.String() {
-			filtered = append(filtered, b.ServerURL)
-			filteredWeights = append(filteredWeights, b.Weight)
+		if b.ServerURL.String() != exclude.String() && b.IsHealthy() {
+			candidates = append(candidates, b)
 		}
 	}
 
-	if len(filtered) == 0 {
+	if len(candidates) == 0 {
 		return nil
 	}
 
-	// Create an ephemeral InMemory pool for single-use algorithm invocation.
-	filteredStates := repository.NewInMemory(filtered, filteredWeights)
-	var stateInterface repository.SharedState = filteredStates
-
-	target, err := lb.algo.GetTarget(&stateInterface, req)
-	if err != nil {
-		return nil
+	// Pick the candidate with the fewest active connections.
+	// This respects real counters for least-connections, and is a
+	// reasonable choice for round-robin/weighted as well.
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.GetActiveConnections() < best.GetActiveConnections() {
+			best = c
+		}
 	}
-	return &target
+
+	u := best.ServerURL
+	return &u
 }
 
 // isIdempotent returns true for methods safe to retry (GET, PUT, DELETE).
