@@ -75,15 +75,17 @@ func (hc *Checker) checkBackend(backend *repository.ServerState) {
 
 	serverURL := backend.ServerURL.String() + "/health"
 	resp, err := client.Get(serverURL)
+
+	var isHealthy bool
 	if err != nil {
-		return
+		// Connection refused, DNS failure, timeout — treat as unhealthy.
+		isHealthy = false
+	} else {
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		isHealthy = resp.StatusCode == http.StatusOK
 	}
-
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	isHealthy := resp.StatusCode == http.StatusOK
 
 	newStatus := "DOWN"
 	if isHealthy {
