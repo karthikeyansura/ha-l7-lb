@@ -86,12 +86,15 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// resetBody replaces the consumed body with a fresh reader from the buffer.
+	// resetBody replaces the consumed body with a fresh reader from the buffer
+	// and restores ContentLength so backends receive the correct header.
 	resetBody := func(req *http.Request) {
 		if bodyBytes != nil {
 			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			req.ContentLength = int64(len(bodyBytes))
 		} else {
 			req.Body = http.NoBody
+			req.ContentLength = 0
 		}
 	}
 
