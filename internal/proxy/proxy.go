@@ -46,6 +46,7 @@ type ReverseProxy struct {
 	algo      algorithms.Rule        // Pluggable routing algorithm.
 	collector *metrics.Collector     // Request-level metrics accumulator.
 	updater   health.StatusUpdater   // Redis-backed health state propagator.
+	transport http.RoundTripper      // HTTP transport for backend requests.
 }
 
 // NewReverseProxy constructs a proxy wired to all subsystems.
@@ -55,6 +56,11 @@ func NewReverseProxy(pool repository.SharedState, algorithm algorithms.Rule, col
 		algo:      algorithm,
 		collector: collector,
 		updater:   updater,
+		transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+		},
 	}
 }
 
@@ -185,7 +191,7 @@ func (lb *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, des
 	outReq.Host = destURL.Host
 	outReq.RequestURI = "" // Required by http.Transport: must not be set on client requests.
 
-	resp, err := http.DefaultTransport.RoundTrip(outReq)
+	resp, err := lb.transport.RoundTrip(outReq)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return TimeoutError{URL: destURL.String()}
