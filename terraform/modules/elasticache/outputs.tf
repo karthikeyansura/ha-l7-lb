@@ -1,4 +1,5 @@
-# Outputs the endpoint as "address:port" for direct use as REDIS_ADDR.
+# Outputs the primary endpoint address as "address:port" for use as REDIS_ADDR.
+# During a failover, AWS automatically remaps this DNS endpoint to the new primary.
 output "redis_endpoint" {
-  value = "${aws_elasticache_cluster.this.cache_nodes[0].address}:${aws_elasticache_cluster.this.cache_nodes[0].port}"
+  value = "${aws_elasticache_replication_group.this.primary_endpoint_address}:${aws_elasticache_replication_group.this.port}"
 }
