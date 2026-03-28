@@ -18,7 +18,8 @@ import (
 func StartDNSWatcher(ctx context.Context, targetHostname, port, scheme string, defaultWeight int, pool repository.SharedState) {
 	ticker := time.NewTicker(5 * time.Second)
 	go func() {
-		// Initial sync
+		defer ticker.Stop()
+
 		syncDNS(targetHostname, port, scheme, defaultWeight, pool)
 
 		for {
