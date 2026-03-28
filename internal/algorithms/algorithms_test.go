@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/karthikeyansura/ha-l7-lb/internal/repository"
@@ -74,17 +75,22 @@ func TestRoundRobin_ConcurrentSafety(t *testing.T) {
 	req, _ := http.NewRequest("GET", "/", nil)
 
 	var wg sync.WaitGroup
+	var errCount atomic.Int64
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			_, err := rr.GetTarget(&pool, req)
 			if err != nil {
-				t.Error(err)
+				errCount.Add(1)
 			}
 		}()
 	}
 	wg.Wait()
+
+	if errCount.Load() > 0 {
+		t.Errorf("expected 0 errors from concurrent GetTarget, got %d", errCount.Load())
+	}
 }
 
 // --- LeastConnections ---

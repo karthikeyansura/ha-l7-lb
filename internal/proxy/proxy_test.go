@@ -116,11 +116,12 @@ func TestProxy_RetriesIdempotentOnFailure(t *testing.T) {
 
 	proxy.ServeHTTP(w, req)
 
-	// The request should eventually succeed via retry on backend2
-	if w.Code != http.StatusOK && callCount == 0 {
-		// If the first backend selected was backend2, it succeeds immediately.
-		// If backend1 was selected first, it should retry on backend2.
-		t.Logf("response code: %d, backend2 calls: %d", w.Code, callCount)
+	// backend2 must have been called (either directly or via retry).
+	if callCount == 0 {
+		t.Errorf("expected backend2 to be called at least once, got callCount=0")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 OK (via direct hit or retry), got %d", w.Code)
 	}
 }
 
