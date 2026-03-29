@@ -3,6 +3,8 @@ package health
 import (
 	"log/slog"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/karthikeyansura/ha-l7-lb/internal/repository"
@@ -24,6 +26,7 @@ type Checker struct {
 	interval time.Duration // Time between full probe cycles.
 	timeout  time.Duration // HTTP client timeout for each /health request.
 	client   *http.Client
+	checking atomic.Bool
 }
 
 // NewChecker constructs a Checker. The interval and timeout are read from
@@ -64,10 +67,25 @@ func (hc *Checker) Start() {
 // Each probe runs in its own goroutine to avoid a single slow backend
 // delaying the entire cycle.
 func (hc *Checker) checkAll() {
-	backends, _ := hc.pool.GetAllServers()
-	for _, backend := range backends {
-		go hc.checkBackend(backend)
+	if !hc.checking.CompareAndSwap(false, true) {
+		return // previous wave still running — skip to prevent overlap
 	}
+	defer hc.checking.Store(false)
+
+	backends, _ := hc.pool.GetAllServers()
+	sem := make(chan struct{}, 10) // max 10 concurrent health probes
+	var wg sync.WaitGroup
+
+	for _, backend := range backends {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(b *repository.ServerState) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			hc.checkBackend(b)
+		}(backend)
+	}
+	wg.Wait()
 }
 
 // checkBackend performs a single HTTP GET to {backend}/health.
