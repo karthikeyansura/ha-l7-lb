@@ -1,0 +1,32 @@
+services:
+  lb:
+    build:
+      context: .
+      dockerfile: Dockerfile.lb
+    image: ha-l7-lb
+    ports:
+      - "8080:8080"
+      - "9080:9080"
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_started
+    volumes:
+      - ./config.docker.yaml:/app/config.yaml:ro
+    environment:
+      - REDIS_ADDR=redis:6379
+    command: ["-config", "config.yaml"]
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: ha-l7-backend
+    expose:
+      - "8080"
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"

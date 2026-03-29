@@ -1,0 +1,21 @@
+# Docker Compose local config override.
+# Uses the Compose service name "backend" instead of AWS Cloud Map "api.internal".
+
+load_balancer:
+  port: 8080
+  timeout: 5s
+
+route:
+  policy: "round-robin"
+  backends:
+    - endpoint: "http://backend:8080"
+      weight: 100
+
+health_check:
+  interval: 10s
+  timeout: 5s
+
+redis:
+  addr: "redis:6379"
+  password: ""
+  db: 0
