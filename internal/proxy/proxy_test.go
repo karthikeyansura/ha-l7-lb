@@ -31,7 +31,7 @@ func setupProxy(handler http.Handler) (*httptest.Server, *ReverseProxy, *reposit
 	algo := &algorithms.RoundRobin{}
 	collector := metrics.NewCollector("round-robin")
 
-	proxy := NewReverseProxy(state, algo, collector, nil)
+	proxy := NewReverseProxy(state, algo, collector, nil, 5*time.Second)
 
 	return backend, proxy, pool
 }
@@ -40,7 +40,7 @@ func TestProxy_ForwardsRequest(t *testing.T) {
 	backend, proxy, _ := setupProxy(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Backend", "test")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	}))
 	defer backend.Close()
 
@@ -66,7 +66,7 @@ func TestProxy_503_NoHealthyBackends(t *testing.T) {
 	algo := &algorithms.RoundRobin{}
 	collector := metrics.NewCollector("round-robin")
 
-	proxy := NewReverseProxy(state, algo, collector, nil)
+	proxy := NewReverseProxy(state, algo, collector, nil, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	w := httptest.NewRecorder()
@@ -84,7 +84,7 @@ func TestProxy_RetriesIdempotentOnFailure(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 
 	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +94,7 @@ func TestProxy_RetriesIdempotentOnFailure(t *testing.T) {
 			t.Fatal("server does not support hijacking")
 		}
 		conn, _, _ := hj.Hijack()
-		conn.Close()
+		_ = conn.Close()
 	}))
 	defer backend1.Close()
 
@@ -109,7 +109,7 @@ func TestProxy_RetriesIdempotentOnFailure(t *testing.T) {
 	algo := &algorithms.RoundRobin{}
 	collector := metrics.NewCollector("round-robin")
 
-	proxy := NewReverseProxy(state, algo, collector, nil)
+	proxy := NewReverseProxy(state, algo, collector, nil, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	w := httptest.NewRecorder()
@@ -132,7 +132,7 @@ func TestProxy_NoRetryForPOST(t *testing.T) {
 			return
 		}
 		conn, _, _ := hj.Hijack()
-		conn.Close()
+		_ = conn.Close()
 	}))
 	defer backend.Close()
 
@@ -142,7 +142,7 @@ func TestProxy_NoRetryForPOST(t *testing.T) {
 	algo := &algorithms.RoundRobin{}
 	collector := metrics.NewCollector("round-robin")
 
-	proxy := NewReverseProxy(state, algo, collector, nil)
+	proxy := NewReverseProxy(state, algo, collector, nil, 5*time.Second)
 
 	req := httptest.NewRequest("POST", "/test", strings.NewReader(`{"key":"value"}`))
 	w := httptest.NewRecorder()
@@ -169,7 +169,7 @@ func TestProxy_TracksConnections(t *testing.T) {
 	algo := &algorithms.RoundRobin{}
 	collector := metrics.NewCollector("round-robin")
 
-	proxy := NewReverseProxy(state, algo, collector, nil)
+	proxy := NewReverseProxy(state, algo, collector, nil, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	w := httptest.NewRecorder()
@@ -204,7 +204,7 @@ func TestProxy_BodyPreservedOnRetry(t *testing.T) {
 			return
 		}
 		conn, _, _ := hj.Hijack()
-		conn.Close()
+		_ = conn.Close()
 	}))
 	defer backend1.Close()
 
@@ -226,7 +226,7 @@ func TestProxy_BodyPreservedOnRetry(t *testing.T) {
 	algo := &algorithms.RoundRobin{}
 	collector := metrics.NewCollector("round-robin")
 
-	proxy := NewReverseProxy(state, algo, collector, nil)
+	proxy := NewReverseProxy(state, algo, collector, nil, 5*time.Second)
 
 	body := `{"test":"data"}`
 	req := httptest.NewRequest("PUT", "/test", strings.NewReader(body))
@@ -268,7 +268,7 @@ func TestSelectDifferent_ExcludesFailedBackend(t *testing.T) {
 	pool := repository.NewInMemory(urls, []int{10, 10, 10})
 	var state repository.SharedState = pool
 
-	proxy := NewReverseProxy(state, &algorithms.RoundRobin{}, metrics.NewCollector("rr"), nil)
+	proxy := NewReverseProxy(state, &algorithms.RoundRobin{}, metrics.NewCollector("rr"), nil, 5*time.Second)
 
 	backends, _ := pool.GetAllServers()
 	exclude := mustURL("http://a:8080")
@@ -295,7 +295,7 @@ func TestSelectDifferent_RespectsConnectionCounts(t *testing.T) {
 	pool.AddConnections(urls[1], 5)
 	pool.AddConnections(urls[2], 20)
 
-	proxy := NewReverseProxy(state, &algorithms.RoundRobin{}, metrics.NewCollector("rr"), nil)
+	proxy := NewReverseProxy(state, &algorithms.RoundRobin{}, metrics.NewCollector("rr"), nil, 5*time.Second)
 
 	backends, _ := pool.GetAllServers()
 	exclude := mustURL("http://a:8080")
@@ -315,7 +315,7 @@ func TestSelectDifferent_SingleBackend_ReturnsNil(t *testing.T) {
 	pool := repository.NewInMemory(urls, []int{10})
 	var state repository.SharedState = pool
 
-	proxy := NewReverseProxy(state, &algorithms.RoundRobin{}, metrics.NewCollector("rr"), nil)
+	proxy := NewReverseProxy(state, &algorithms.RoundRobin{}, metrics.NewCollector("rr"), nil, 5*time.Second)
 
 	backends, _ := pool.GetAllServers()
 	exclude := mustURL("http://a:8080")
