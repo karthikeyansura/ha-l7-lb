@@ -49,8 +49,8 @@ type RedisManager struct {
 }
 
 // NewRedisManager establishes a Redis connection and verifies reachability
-// via PING with a 5-second timeout. Returns an error if Redis is unreachable,
-// which causes the LB to abort startup rather than run without coordination.
+// via PING with a 5-second timeout. Returns an error if Redis is unreachable;
+// the caller decides how to handle it (currently: degrade to local-only health).
 //
 // Auto-detection logic: if addr contains commas (e.g., "host1:6379,host2:6379"),
 // a ClusterClient is created. Otherwise, a single-node Client is used.
