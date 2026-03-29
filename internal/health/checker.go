@@ -23,6 +23,7 @@ type Checker struct {
 	updater  StatusUpdater // Typically RedisManager; propagates changes to all LB instances.
 	interval time.Duration // Time between full probe cycles.
 	timeout  time.Duration // HTTP client timeout for each /health request.
+	client   *http.Client
 }
 
 // NewChecker constructs a Checker. The interval and timeout are read from
@@ -33,6 +34,14 @@ func NewChecker(pool *repository.InMemory, updater StatusUpdater, interval, time
 		updater:  updater,
 		interval: interval,
 		timeout:  timeout,
+		client: &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 	}
 }
 
@@ -69,12 +78,8 @@ func (hc *Checker) checkAll() {
 // State changes only: if the probed status matches the current Healthy flag,
 // no update is published. This minimizes Redis write frequency.
 func (hc *Checker) checkBackend(backend *repository.ServerState) {
-	client := &http.Client{
-		Timeout: hc.timeout,
-	}
-
 	serverURL := backend.ServerURL.String() + "/health"
-	resp, err := client.Get(serverURL)
+	resp, err := hc.client.Get(serverURL)
 
 	var isHealthy bool
 	if err != nil {
