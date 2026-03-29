@@ -2,7 +2,6 @@ package algorithms
 
 import (
 	"errors"
-	"math"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -10,25 +9,20 @@ import (
 	"github.com/karthikeyansura/ha-l7-lb/internal/repository"
 )
 
-// LeastConnectionsPolicy selects the healthy backend with the fewest
-// active (in-flight) connections.
+// LeastConnectionsPolicy selects a healthy backend using the Power of Two Choices
+// algorithm. Instead of scanning all backends to find the absolute minimum
+// (which is inefficient and relies on perfectly synchronized global state),
+// it picks two distinct random backends and routes the request to the one
+// with fewer active connections.
 //
-// This is the stateful algorithm for Experiment 1: it reads
-// ActiveConnections from each ServerState, which is maintained via
-// atomic increments/decrements in the proxy's AddConnections/RemoveConnections
-// calls. In a multi-LB deployment, these counters are local to each instance,
-// meaning the routing decision is based on each LB's own view of load.
-//
-// Tie-breaking: when multiple backends share the minimum connection count,
-// one is selected uniformly at random. This prevents deterministic pile-on
-// where all LB instances simultaneously route to the same backend.
+// This is the stateful algorithm for Experiment 1: it reads ActiveConnections
+// from each ServerState. This randomized approach provides near-optimal load
+// distribution even when each LB instance only has a local view of connection
+// counts in a horizontally scaled multi-LB deployment.
 type LeastConnectionsPolicy struct{}
 
-// GetTarget iterates all healthy backends, finds those with the minimum
-// connection count, and selects randomly among tied candidates.
-//
-// The scan initializes minConns to math.MaxInt64, guaranteeing that the
-// first healthy server becomes a candidate regardless of its count.
+// GetTarget selects a backend using the Power of Two Choices algorithm.
+// It returns an error if no healthy servers are available.
 func (lc *LeastConnectionsPolicy) GetTarget(state *repository.SharedState, _ *http.Request) (url.URL, error) {
 	servers, err := (*state).GetHealthy()
 	if err != nil {
@@ -38,28 +32,23 @@ func (lc *LeastConnectionsPolicy) GetTarget(state *repository.SharedState, _ *ht
 		return url.URL{}, errors.New("no server found")
 	}
 
-	var candidates []*repository.ServerState
-	minConns := int64(math.MaxInt64)
-
-	for _, srv := range servers {
-		// Atomic read; no mutex required for the connection count.
-		conns := srv.GetActiveConnections()
-
-		if conns < minConns {
-			// New minimum: reset candidate set to just this server.
-			minConns = conns
-			candidates = []*repository.ServerState{srv}
-		} else if conns == minConns {
-			// Tie: add to candidate set for random selection below.
-			candidates = append(candidates, srv)
-		}
+	// Single backend: no choice needed.
+	if len(servers) == 1 {
+		return servers[0].ServerURL, nil
 	}
 
-	if len(candidates) == 0 {
-		return url.URL{}, errors.New("no server found")
+	// Power of Two Choices: pick two distinct random backends and select
+	// the one with fewer active connections. This provides near-optimal
+	// load distribution even with local-only counters across LB instances.
+	i := rand.Intn(len(servers))
+	j := rand.Intn(len(servers) - 1)
+	if j >= i {
+		j++
 	}
 
-	// Uniform random tie-break prevents thundering herd across LB instances.
-	index := rand.Intn(len(candidates))
-	return candidates[index].ServerURL, nil
+	a, b := servers[i], servers[j]
+	if a.GetActiveConnections() <= b.GetActiveConnections() {
+		return a.ServerURL, nil
+	}
+	return b.ServerURL, nil
 }
