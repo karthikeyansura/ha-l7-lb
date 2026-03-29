@@ -162,15 +162,18 @@ func main() {
 		}
 	}()
 
-	setupGracefulShutdown(collector, *metricsOut)
-
+	// Construct the listening address from config
 	addr := fmt.Sprintf(":%d", config.AppConfig.LoadBalancer.Port)
+
+	server := &http.Server{Addr: addr, Handler: lb}
+
+	setupGracefulShutdown(collector, *metricsOut, server)
 
 	slog.Info(fmt.Sprintf("Load balancer starting on %s with %s policy", addr, route.Policy))
 	slog.Info(fmt.Sprintf("Base discovery target: %s", route.Backends[0].Endpoint))
 	slog.Info(fmt.Sprintf("Metrics available at http://localhost:%d/metrics", config.AppConfig.LoadBalancer.Port+1000))
 
-	log.Fatal(http.ListenAndServe(addr, lb))
+	log.Fatal(server.ListenAndServe())
 }
 
 // startMetricsServer runs an HTTP server exposing operational endpoints:
@@ -240,13 +243,20 @@ func startMetricsServer(collector *metrics.Collector, pool repository.SharedStat
 // setupGracefulShutdown intercepts SIGINT and SIGTERM to persist metrics
 // before exit. ECS sends SIGTERM on task stop; this ensures experiment
 // data is not lost when scaling down LB instances.
-func setupGracefulShutdown(collector *metrics.Collector, outputFile string) {
+func setupGracefulShutdown(collector *metrics.Collector, outputFile string, server *http.Server) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-c
 		slog.Info("Shutting down gracefully...")
+
+		// Drain in-flight HTTP connections (10s timeout).
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			slog.Error(fmt.Sprintf("HTTP server shutdown error: %v", err))
+		}
 
 		summary := collector.GetSummary()
 		data, _ := json.MarshalIndent(summary, "", "  ")
