@@ -7,7 +7,7 @@
 //  2. Check that at least one healthy backend exists (503 if not).
 //  3. Select a backend via the configured algorithm.
 //  4. Increment the backend's active connection counter.
-//  5. Forward the request with a 2-second timeout.
+//  5. Forward the request with the configured timeout.
 //  6. On success: record metrics, return response to client.
 //  7. On failure for idempotent methods (GET, PUT, DELETE):
 //     a. Mark the failed backend as DOWN locally and via Redis.
@@ -224,8 +224,8 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // proxyRequest forwards a single HTTP request to the destination backend.
-// A 2-second context timeout prevents slow backends from holding proxy
-// goroutines indefinitely. On timeout, a typed TimeoutError is returned
+// A context timeout (configured via load_balancer.timeout) prevents slow
+// backends from holding proxy goroutines indefinitely. On timeout, a typed TimeoutError is returned
 // so callers can distinguish timeouts from connection failures.
 func (lb *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, destURL *url.URL) error {
 	ctx, cancel := context.WithTimeout(r.Context(), lb.timeout)
@@ -320,7 +320,7 @@ func isClientDisconnect(err error) bool {
 		strings.Contains(errMsg, "connection reset by peer")
 }
 
-// TimeoutError indicates a backend request exceeded the 2-second deadline.
+// TimeoutError indicates a backend request exceeded the configured timeout.
 type TimeoutError struct {
 	URL string
 }
