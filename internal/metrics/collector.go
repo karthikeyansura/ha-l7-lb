@@ -14,11 +14,14 @@ package metrics
 import (
 	"encoding/csv"
 	"fmt"
+	"math/rand"
 	"os"
 	"sort"
 	"sync"
 	"time"
 )
+
+const maxLatencySamples = 10000
 
 // Collector is the central metrics accumulator. One instance is created
 // per LB process, shared by all proxy goroutines via the RWMutex.
@@ -42,6 +45,9 @@ type Collector struct {
 
 	timeSeriesData []*TimeSeriesPoint
 	startTime      time.Time // Used to compute cumulative requests-per-second.
+
+	latencyCount int64   // Total number of recorded latencies (for exact average).
+	latencySum   float64 // Running sum for average computation.
 }
 
 // BackendMetrics tracks per-backend request counts and cumulative latency.
@@ -93,7 +99,7 @@ func NewCollector(policyName string) *Collector {
 	return &Collector{
 		backendMetrics: make(map[string]*BackendMetrics),
 		policyName:     policyName,
-		latencies:      make([]float64, 0, 10000),
+		latencies:      make([]float64, 0, maxLatencySamples),
 		timeSeriesData: make([]*TimeSeriesPoint, 0),
 		startTime:      time.Now(),
 	}
@@ -117,7 +123,18 @@ func (c *Collector) RecordRequest(backend string, latency time.Duration, success
 	}
 
 	latencyMs := float64(latency.Milliseconds())
-	c.latencies = append(c.latencies, latencyMs)
+	c.latencyCount++
+	c.latencySum += latencyMs
+
+	if len(c.latencies) < maxLatencySamples {
+		c.latencies = append(c.latencies, latencyMs)
+	} else {
+		// Reservoir sampling: replace a random element with decreasing probability.
+		j := rand.Int63n(c.latencyCount)
+		if j < maxLatencySamples {
+			c.latencies[j] = latencyMs
+		}
+	}
 
 	// Lazily initialize per-backend metrics on first request.
 	if _, exists := c.backendMetrics[backend]; !exists {
@@ -150,12 +167,8 @@ func (c *Collector) RecordTimeSeriesPoint(activeBackends int) {
 	rps := float64(c.totalRequests) / elapsed
 
 	avgLatency := 0.0
-	if len(c.latencies) > 0 {
-		sum := 0.0
-		for _, l := range c.latencies {
-			sum += l
-		}
-		avgLatency = sum / float64(len(c.latencies))
+	if c.latencyCount > 0 {
+		avgLatency = c.latencySum / float64(c.latencyCount)
 	}
 
 	c.timeSeriesData = append(c.timeSeriesData, &TimeSeriesPoint{
@@ -199,12 +212,10 @@ func (c *Collector) GetSummary() *Summary {
 		summary.LatencyP50 = percentile(sorted, 50)
 		summary.LatencyP95 = percentile(sorted, 95)
 		summary.LatencyP99 = percentile(sorted, 99)
+	}
 
-		sum := 0.0
-		for _, l := range sorted {
-			sum += l
-		}
-		summary.AvgLatency = sum / float64(len(sorted))
+	if c.latencyCount > 0 {
+		summary.AvgLatency = c.latencySum / float64(c.latencyCount)
 	}
 
 	for url, bm := range c.backendMetrics {
