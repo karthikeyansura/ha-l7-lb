@@ -82,6 +82,7 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		err := r.Body.Close()
 		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 	}
