@@ -104,20 +104,30 @@ func TestLeastConnections_SelectsLowest(t *testing.T) {
 	im := repository.NewInMemory(urls, []int{10, 10, 10})
 	var pool repository.SharedState = im
 
-	// Give a:10, b:5, c:20 connections
+	// Give a:10, b:0, c:20 connections.
+	// With Power of Two Choices, b (fewest) should win most comparisons.
 	im.AddConnections(urls[0], 10)
-	im.AddConnections(urls[1], 5)
 	im.AddConnections(urls[2], 20)
 
 	lc := &LeastConnectionsPolicy{}
 	req, _ := http.NewRequest("GET", "/", nil)
 
-	target, err := lc.GetTarget(&pool, req)
-	if err != nil {
-		t.Fatal(err)
+	counts := map[string]int{}
+	iterations := 1000
+	for i := 0; i < iterations; i++ {
+		target, err := lc.GetTarget(&pool, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts[target.String()]++
 	}
-	if target.String() != "http://b:8080" {
-		t.Errorf("expected http://b:8080 (least connections), got %s", target.String())
+
+	bCount := counts["http://b:8080"]
+	// b has 0 connections; it wins any pair it appears in.
+	// Probability of b appearing in a random pair of 3 = 1 - C(2,2)/C(3,2) = 1 - 1/3 ≈ 66%.
+	// Allow generous lower bound of 50% to avoid flaky failures.
+	if bCount < iterations/2 {
+		t.Errorf("expected b:8080 (0 conns) to be selected >50%% of the time, got %d/%d", bCount, iterations)
 	}
 }
 
