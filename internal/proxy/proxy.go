@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/karthikeyansura/ha-l7-lb/internal/algorithms"
@@ -41,16 +42,19 @@ import (
 )
 
 const maxBodySize = 10 << 20 // 10 MB payload limit to prevent OOM on buffered retries
+const retryBudgetPct = 0.20  // max 20% of in-flight requests may be retries
 
 // ReverseProxy implements http.Handler. Each incoming request is routed
 // to a backend, proxied, and optionally retried on failure.
 type ReverseProxy struct {
-	pool      repository.SharedState // Backend server pool (InMemory, synced via Redis).
-	algo      algorithms.Rule        // Pluggable routing algorithm.
-	collector *metrics.Collector     // Request-level metrics accumulator.
-	updater   health.StatusUpdater   // Redis-backed health state propagator.
-	transport http.RoundTripper      // HTTP transport for backend requests.
-	timeout   time.Duration          // Backend request timeout from config.
+	pool           repository.SharedState // Backend server pool (InMemory, synced via Redis).
+	algo           algorithms.Rule        // Pluggable routing algorithm.
+	collector      *metrics.Collector     // Request-level metrics accumulator.
+	updater        health.StatusUpdater   // Redis-backed health state propagator.
+	transport      http.RoundTripper      // HTTP transport for backend requests.
+	timeout        time.Duration          // Backend request timeout from config.
+	activeRequests int64                  // atomic: in-flight requests
+	activeRetries  int64                  // atomic: in-flight retry requests
 }
 
 // NewReverseProxy constructs a proxy wired to all subsystems.
@@ -76,6 +80,9 @@ func NewReverseProxy(pool repository.SharedState, algorithm algorithms.Rule, col
 // a retry requires replaying the body from the buffer. The trade-off
 // is increased memory usage proportional to request body size.
 func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	atomic.AddInt64(&lb.activeRequests, 1)
+	defer atomic.AddInt64(&lb.activeRequests, -1)
+
 	// Buffer request body for potential retry replay.
 	var bodyBytes []byte
 	var err error
@@ -150,55 +157,65 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Retry logic: only for HTTP methods that are safe to re-execute.
 	// GET, PUT, DELETE are idempotent per RFC 7231. POST, PATCH are not.
 	if isIdempotent(r.Method) {
-
-		// Debounce: only mark DOWN and propagate if the backend is still
-		// considered healthy. Under concurrent failures, the first goroutine
-		// to reach this point handles the update; subsequent ones skip it.
-		alreadyDown := false
-		if servers, sErr := lb.pool.GetAllServers(); sErr == nil {
-			for _, s := range servers {
-				if s.ServerURL == backendURL && !s.IsHealthy() {
-					alreadyDown = true
-					break
-				}
-			}
-		}
-
-		if !alreadyDown {
-			lb.pool.MarkHealthy(backendURL, false)
-
-			go func(u string) {
-				if lb.updater != nil {
-					serverURL, _ := url.Parse(u)
-					err := lb.updater.UpdateBackendStatus(*serverURL, "DOWN")
-					if err != nil {
-						slog.Error(fmt.Sprintf("Failed to update Redis for %s: %v", u, err))
+		// Retry budget: skip retry if too many retries are already in-flight
+		currentTotal := atomic.LoadInt64(&lb.activeRequests)
+		currentRetries := atomic.LoadInt64(&lb.activeRetries)
+		if currentTotal > 0 && float64(currentRetries)/float64(currentTotal) > retryBudgetPct {
+			slog.Warn("Retry budget exceeded, skipping retry",
+				"activeRequests", currentTotal, "activeRetries", currentRetries)
+		} else {
+			// Debounce: only mark DOWN and propagate if the backend is still
+			// considered healthy. Under concurrent failures, the first goroutine
+			// to reach this point handles the update; subsequent ones skip it.
+			alreadyDown := false
+			if servers, sErr := lb.pool.GetAllServers(); sErr == nil {
+				for _, s := range servers {
+					if s.ServerURL == backendURL && !s.IsHealthy() {
+						alreadyDown = true
+						break
 					}
 				}
-			}(backendURL.String())
-		}
-
-		// Re-fetch healthy backends to reflect the just-marked-DOWN state.
-		freshHealthy, _ := lb.pool.GetHealthy()
-		newBackendURL := lb.selectDifferent(freshHealthy, &backendURL, r)
-		if newBackendURL != nil {
-			slog.Info(fmt.Sprintf("Retrying idempotent request on %s...", newBackendURL))
-
-			lb.pool.AddConnections(*newBackendURL, 1)
-			defer lb.pool.RemoveConnections(*newBackendURL, 1)
-
-			resetBody(r)
-			retryStart := time.Now()
-
-			err = lb.proxyRequest(w, r, newBackendURL)
-
-			if err == nil {
-				// Record as retried=true so the retry rate metric is accurate.
-				lb.collector.RecordRequest(newBackendURL.String(), time.Since(retryStart), true, false, true)
-				return
 			}
-			slog.Error(fmt.Sprintf("Retry on %s also failed: %v", newBackendURL.String(), err))
-		}
+
+			if !alreadyDown {
+				lb.pool.MarkHealthy(backendURL, false)
+
+				go func(u string) {
+					if lb.updater != nil {
+						serverURL, _ := url.Parse(u)
+						err := lb.updater.UpdateBackendStatus(*serverURL, "DOWN")
+						if err != nil {
+							slog.Error(fmt.Sprintf("Failed to update Redis for %s: %v", u, err))
+						}
+					}
+				}(backendURL.String())
+			}
+
+			// Re-fetch healthy backends to reflect the just-marked-DOWN state.
+			freshHealthy, _ := lb.pool.GetHealthy()
+			newBackendURL := lb.selectDifferent(freshHealthy, &backendURL, r)
+			if newBackendURL != nil {
+				atomic.AddInt64(&lb.activeRetries, 1)
+				defer atomic.AddInt64(&lb.activeRetries, -1)
+
+				slog.Info(fmt.Sprintf("Retrying idempotent request on %s...", newBackendURL))
+
+				lb.pool.AddConnections(*newBackendURL, 1)
+				defer lb.pool.RemoveConnections(*newBackendURL, 1)
+
+				resetBody(r)
+				retryStart := time.Now()
+
+				err = lb.proxyRequest(w, r, newBackendURL)
+
+				if err == nil {
+					// Record as retried=true so the retry rate metric is accurate.
+					lb.collector.RecordRequest(newBackendURL.String(), time.Since(retryStart), true, false, true)
+					return
+				}
+				slog.Error(fmt.Sprintf("Retry on %s also failed: %v", newBackendURL.String(), err))
+			}
+		} // end of else (budget not exceeded)
 	}
 
 	// Both attempts failed, or method is non-idempotent.
