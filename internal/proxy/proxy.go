@@ -220,6 +220,14 @@ func (lb *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, des
 		}
 	}(resp.Body)
 
+	// Treat 5xx responses as backend errors to trigger retry logic.
+	// RoundTrip succeeds for 5xx (it's a valid HTTP response), but the
+	// proxy should retry idempotent requests on another backend.
+	if resp.StatusCode >= 500 {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return BackendError{URL: destURL.String(), StatusCode: resp.StatusCode}
+	}
+
 	// Stream response headers and body back to the client.
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -269,6 +277,16 @@ func isIdempotent(method string) bool {
 // TimeoutError indicates a backend request exceeded the 2-second deadline.
 type TimeoutError struct {
 	URL string
+}
+
+// BackendError indicates the backend returned a server error (5xx).
+type BackendError struct {
+	URL        string
+	StatusCode int
+}
+
+func (e BackendError) Error() string {
+	return fmt.Sprintf("backend %s returned %d", e.URL, e.StatusCode)
 }
 
 func (e TimeoutError) Error() string {
