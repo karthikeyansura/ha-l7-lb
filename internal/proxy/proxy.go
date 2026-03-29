@@ -219,7 +219,9 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Both attempts failed, or method is non-idempotent.
-	lb.collector.RecordRequest(backendURL.String(), time.Since(startTime), false, true, false)
+	var timeoutErr TimeoutError
+	isTimeout := errors.As(err, &timeoutErr)
+	lb.collector.RecordRequest(backendURL.String(), time.Since(startTime), false, isTimeout, false)
 	http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
 }
 
