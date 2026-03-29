@@ -151,22 +151,32 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// GET, PUT, DELETE are idempotent per RFC 7231. POST, PATCH are not.
 	if isIdempotent(r.Method) {
 
-		// Immediately mark backend DOWN in local state.
-		lb.pool.MarkHealthy(backendURL, false)
-
-		// Asynchronously propagate DOWN to all LB instances via Redis.
-		// Fire-and-forget: the local state is already updated, so this
-		// LB won't route to the failed backend. Redis propagation is
-		// best-effort for other instances.
-		go func(u string) {
-			if lb.updater != nil {
-				serverURL, _ := url.Parse(u)
-				err := lb.updater.UpdateBackendStatus(*serverURL, "DOWN")
-				if err != nil {
-					slog.Error(fmt.Sprintf("Failed to update Redis for %s: %v", u, err))
+		// Debounce: only mark DOWN and propagate if the backend is still
+		// considered healthy. Under concurrent failures, the first goroutine
+		// to reach this point handles the update; subsequent ones skip it.
+		alreadyDown := false
+		if servers, sErr := lb.pool.GetAllServers(); sErr == nil {
+			for _, s := range servers {
+				if s.ServerURL == backendURL && !s.IsHealthy() {
+					alreadyDown = true
+					break
 				}
 			}
-		}(backendURL.String())
+		}
+
+		if !alreadyDown {
+			lb.pool.MarkHealthy(backendURL, false)
+
+			go func(u string) {
+				if lb.updater != nil {
+					serverURL, _ := url.Parse(u)
+					err := lb.updater.UpdateBackendStatus(*serverURL, "DOWN")
+					if err != nil {
+						slog.Error(fmt.Sprintf("Failed to update Redis for %s: %v", u, err))
+					}
+				}
+			}(backendURL.String())
+		}
 
 		// Re-fetch healthy backends to reflect the just-marked-DOWN state.
 		freshHealthy, _ := lb.pool.GetHealthy()
