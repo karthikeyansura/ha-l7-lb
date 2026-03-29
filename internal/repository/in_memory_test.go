@@ -173,7 +173,7 @@ func TestConcurrentAccess(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			pool.GetHealthy()
+			_, _ = pool.GetHealthy()
 		}()
 		go func() {
 			defer wg.Done()
@@ -201,5 +201,83 @@ func TestGetAllServers_ReturnsCopy(t *testing.T) {
 	servers1[0] = nil
 	if servers2[0] == nil {
 		t.Error("GetAllServers should return independent slice copies")
+	}
+}
+
+func TestSyncServers_DrainsBackendWithActiveConnections(t *testing.T) {
+	pool := newTestPool()
+	u := mustURL("http://backend2:8080")
+
+	pool.AddConnections(u, 5)
+
+	// Sync to only backend1 — backend2 and backend3 are removed from DNS.
+	pool.SyncServers([]url.URL{mustURL("http://backend1:8080")}, 50)
+
+	servers, _ := pool.GetAllServers()
+
+	// backend1 + backend2 (draining, has 5 connections). backend3 (0 conns) should be dropped.
+	if len(servers) != 2 {
+		t.Fatalf("expected 2 servers (1 active + 1 draining), got %d", len(servers))
+	}
+
+	for _, s := range servers {
+		if s.ServerURL == u {
+			if s.IsHealthy() {
+				t.Error("draining backend should be marked unhealthy")
+			}
+			if !s.IsDraining() {
+				t.Error("backend with active connections should be marked as draining")
+			}
+			if s.GetActiveConnections() != 5 {
+				t.Errorf("expected 5 active connections preserved, got %d", s.GetActiveConnections())
+			}
+			return
+		}
+	}
+	t.Error("draining backend2 should still be in the pool")
+}
+
+func TestSyncServers_DropsBackendWithZeroConnections(t *testing.T) {
+	pool := newTestPool()
+
+	// All backends have 0 connections. Sync to only backend1.
+	pool.SyncServers([]url.URL{mustURL("http://backend1:8080")}, 50)
+
+	servers, _ := pool.GetAllServers()
+	if len(servers) != 1 {
+		t.Fatalf("expected 1 server (backends with 0 conns dropped), got %d", len(servers))
+	}
+	if servers[0].ServerURL.String() != "http://backend1:8080" {
+		t.Errorf("expected backend1 to remain, got %s", servers[0].ServerURL.String())
+	}
+}
+
+func TestSyncServers_ReapsDrainedBackend(t *testing.T) {
+	pool := newTestPool()
+	u2 := mustURL("http://backend2:8080")
+	keepURL := mustURL("http://backend1:8080")
+
+	pool.AddConnections(u2, 3)
+
+	// First sync: backend2 becomes draining (has 3 connections).
+	pool.SyncServers([]url.URL{keepURL}, 50)
+
+	servers, _ := pool.GetAllServers()
+	if len(servers) != 2 {
+		t.Fatalf("expected 2 servers after first sync, got %d", len(servers))
+	}
+
+	// Simulate connections draining to 0.
+	pool.RemoveConnections(u2, 3)
+
+	// Second sync: backend2 now has 0 connections and should be reaped.
+	pool.SyncServers([]url.URL{keepURL}, 50)
+
+	servers, _ = pool.GetAllServers()
+	if len(servers) != 1 {
+		t.Fatalf("expected 1 server after second sync (drained backend removed), got %d", len(servers))
+	}
+	if servers[0].ServerURL.String() != "http://backend1:8080" {
+		t.Errorf("expected backend1, got %s", servers[0].ServerURL.String())
 	}
 }
