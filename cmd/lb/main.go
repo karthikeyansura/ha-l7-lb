@@ -7,22 +7,23 @@
 //   - Metrics collector (latency, throughput, percentiles)
 //   - Reverse proxy (L7 forwarding with retry)
 //   - Metrics HTTP server (JSON/CSV endpoints on port+1000)
-//   - Graceful shutdown (dump metrics to disk on SIGTERM)
+//   - Graceful shutdown (drain connections + dump metrics on SIGTERM)
 //
 // Startup sequence:
 //  1. Load config (YAML + REDIS_ADDR env override).
 //  2. Parse base target URL and instantiate the routing algorithm.
 //  3. Create empty InMemory shared state.
 //  4. Start Dynamic DNS Discovery in a background goroutine to populate the state.
-//  5. Connect to Redis; abort if unreachable.
+//  5. Connect to Redis; if unavailable, degrade to local-only health mode.
 //  6. Sync local state from Redis (handles LB restart scenarios).
-//  7. Start Redis Pub/Sub watcher (background goroutine).
-//  8. Start health checker (background goroutine).
-//  9. Start metrics time-series recorder (every 5s, background goroutine).
-//
-// 10. Start metrics HTTP server (port+1000, background goroutine).
-// 11. Register graceful shutdown handler (SIGINT/SIGTERM).
-// 12. Start the main HTTP server (foreground, blocks until exit).
+//  7. Start periodic re-sync ticker (heals missed Pub/Sub events).
+//  8. Start Redis Pub/Sub watcher (background goroutine).
+//  9. Start health checker (background goroutine).
+//  10. Start metrics time-series recorder (every 5s, background goroutine).
+//  11. Start metrics HTTP server (port+1000, background goroutine).
+//  12. Register graceful shutdown handler (SIGINT/SIGTERM → drain connections
+//     with 10s timeout, then flush metrics to disk).
+//  13. Start the main HTTP server (foreground, blocks until exit).
 package main
 
 import (
