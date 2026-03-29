@@ -137,7 +137,7 @@ func main() {
 
 	// Construct the reverse proxy. updater may be nil in degraded mode;
 	// the proxy already nil-checks before calling it.
-	lb := proxy.NewReverseProxy(sharedState, policy, collector, updater)
+	lb := proxy.NewReverseProxy(sharedState, policy, collector, updater, config.AppConfig.LoadBalancer.Timeout)
 
 	// Health checker: periodic /health GETs against all backends.
 	// In degraded mode, updater is nil — checker will update local state only.
