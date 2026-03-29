@@ -49,15 +49,17 @@ type ReverseProxy struct {
 	collector *metrics.Collector     // Request-level metrics accumulator.
 	updater   health.StatusUpdater   // Redis-backed health state propagator.
 	transport http.RoundTripper      // HTTP transport for backend requests.
+	timeout   time.Duration          // Backend request timeout from config.
 }
 
 // NewReverseProxy constructs a proxy wired to all subsystems.
-func NewReverseProxy(pool repository.SharedState, algorithm algorithms.Rule, collector *metrics.Collector, updater health.StatusUpdater) *ReverseProxy {
+func NewReverseProxy(pool repository.SharedState, algorithm algorithms.Rule, collector *metrics.Collector, updater health.StatusUpdater, timeout time.Duration) *ReverseProxy {
 	return &ReverseProxy{
 		pool:      pool,
 		algo:      algorithm,
 		collector: collector,
 		updater:   updater,
+		timeout:   timeout,
 		transport: &http.Transport{
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 20,
@@ -192,7 +194,7 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // goroutines indefinitely. On timeout, a typed TimeoutError is returned
 // so callers can distinguish timeouts from connection failures.
 func (lb *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, destURL *url.URL) error {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), lb.timeout)
 	defer cancel()
 
 	// Clone request with the timeout context.
