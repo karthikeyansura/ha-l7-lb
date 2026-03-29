@@ -121,6 +121,9 @@ func main() {
 			// were already marked DOWN by other LB instances).
 			redisMgr.SyncOnStartUp()
 
+			// Periodic re-sync heals missed Pub/Sub messages.
+			redisMgr.StartPeriodicSync(context.Background(), 30*time.Second)
+
 			// Subscribe to Pub/Sub for real-time cross-instance health updates.
 			redisMgr.StartRedisWatcher()
 

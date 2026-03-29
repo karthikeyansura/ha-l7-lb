@@ -157,6 +157,24 @@ func (rm *RedisManager) SyncOnStartUp() {
 	}
 }
 
+// StartPeriodicSync runs SyncOnStartUp on a background ticker to heal
+// any state divergence caused by missed Pub/Sub messages. This enforces
+// eventual consistency without relying solely on fire-and-forget Pub/Sub.
+func (rm *RedisManager) StartPeriodicSync(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				rm.SyncOnStartUp()
+			}
+		}
+	}()
+}
+
 // StartRedisWatcher launches a background goroutine that subscribes to
 // the Pub/Sub channel and applies incoming health state changes to
 // the local InMemory pool.
