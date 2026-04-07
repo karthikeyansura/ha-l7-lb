@@ -155,7 +155,7 @@ func main() {
 	checker.Start(ctx)
 
 	// Metrics HTTP server on port+1000 (e.g., 9080 if LB is on 8080).
-	go startMetricsServer(collector, sharedState, config.AppConfig.LoadBalancer.Port+1000)
+	metricsServer := startMetricsServer(collector, sharedState, config.AppConfig.LoadBalancer.Port+1000)
 
 	// Time-series recorder: captures RPS and avg latency every 5 seconds.
 	go func() {
@@ -178,7 +178,8 @@ func main() {
 
 	server := &http.Server{Addr: addr, Handler: lb}
 
-	setupGracefulShutdown(collector, *metricsOut, server, cancelAll)
+	done := make(chan bool, 1)
+	setupGracefulShutdown(collector, *metricsOut, server, metricsServer, cancelAll, done)
 
 	slog.Info(fmt.Sprintf("Load balancer starting on %s with %s policy", addr, route.Policy))
 	slog.Info(fmt.Sprintf("Base discovery target: %s", route.Backends[0].Endpoint))
@@ -187,8 +188,8 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
-	// On graceful shutdown, ListenAndServe returns ErrServerClosed.
-	// Deferred functions (redisMgr.Close, cancelAll) run here.
+
+	<-done
 }
 
 // startMetricsServer runs an HTTP server exposing operational endpoints:
@@ -196,7 +197,7 @@ func main() {
 //   - GET /metrics/timeseries: JSON array of periodic time-series snapshots.
 //   - GET /metrics/export: CSV download of time-series data.
 //   - GET /health/backends: current health status of all registered backends.
-func startMetricsServer(collector *metrics.Collector, pool repository.SharedState, port int) {
+func startMetricsServer(collector *metrics.Collector, pool repository.SharedState, port int) *http.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -251,14 +252,28 @@ func startMetricsServer(collector *metrics.Collector, pool repository.SharedStat
 			return
 		}
 	})
+
 	addr := fmt.Sprintf(":%d", port)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error(fmt.Sprintf("Metrics server error: %v", err))
+		}
+	}()
+	return srv
 }
 
 // setupGracefulShutdown intercepts SIGINT and SIGTERM to persist metrics
 // before exit. ECS sends SIGTERM on task stop; this ensures experiment
 // data is not lost when scaling down LB instances.
-func setupGracefulShutdown(collector *metrics.Collector, outputFile string, server *http.Server, cancelAll context.CancelFunc) {
+func setupGracefulShutdown(
+	collector *metrics.Collector,
+	outputFile string,
+	server *http.Server,
+	metricsServer *http.Server,
+	cancelAll context.CancelFunc,
+	done chan bool,
+) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
@@ -276,12 +291,13 @@ func setupGracefulShutdown(collector *metrics.Collector, outputFile string, serv
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			slog.Error(fmt.Sprintf("HTTP server shutdown error: %v", err))
 		}
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			slog.Error(fmt.Sprintf("Metrics server shutdown error: %v", err))
+		}
 
 		summary := collector.GetSummary()
 		data, err := json.MarshalIndent(summary, "", "  ")
-		if err != nil {
-			slog.Error(fmt.Sprintf("Failed to marshal metrics: %v", err))
-		} else {
+		if err == nil {
 			if err := os.WriteFile(outputFile, data, 0644); err != nil {
 				slog.Error(fmt.Sprintf("Metrics cannot be saved to %s", outputFile))
 			} else {
@@ -290,13 +306,10 @@ func setupGracefulShutdown(collector *metrics.Collector, outputFile string, serv
 		}
 
 		csvFile := outputFile + ".csv"
-		if err := collector.ExportCSV(csvFile); err != nil {
-			slog.Error(fmt.Sprintf("Time-series data cannot be saved to %s", csvFile))
-		} else {
+		if err := collector.ExportCSV(csvFile); err == nil {
 			slog.Info(fmt.Sprintf("Time-series data saved to %s", csvFile))
 		}
 
-		// server.Shutdown causes ListenAndServe to return ErrServerClosed,
-		// which unblocks main() and allows deferred functions (redisMgr.Close) to run.
+		done <- true
 	}()
 }
