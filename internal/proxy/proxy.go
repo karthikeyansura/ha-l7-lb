@@ -269,7 +269,11 @@ func (lb *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, des
 	w.WriteHeader(resp.StatusCode)
 	_, err = io.Copy(w, resp.Body)
 	if err != nil {
-		return err
+		// Headers are already committed (WriteHeader was called).
+		// The error is likely a client disconnect mid-stream.
+		// Return nil to prevent the caller from writing another HTTP error
+		// response on an already-committed ResponseWriter.
+		return nil
 	}
 
 	return nil

@@ -185,9 +185,8 @@ func (rm *RedisManager) StartPeriodicSync(ctx context.Context, interval time.Dur
 //
 // This goroutine runs for the lifetime of the process. If the Redis
 // connection drops, the go-redis library automatically reconnects.
-func (rm *RedisManager) StartRedisWatcher() {
+func (rm *RedisManager) StartRedisWatcher(ctx context.Context) {
 	go func() {
-		ctx := context.Background()
 		sub := rm.client.Subscribe(ctx, PubSubChannel)
 		defer func() {
 			_ = sub.Close()
@@ -196,22 +195,31 @@ func (rm *RedisManager) StartRedisWatcher() {
 		ch := sub.Channel()
 		slog.Info("Started watching Redis Pub/Sub for changes...")
 
-		for msg := range ch {
-			parts := strings.Split(msg.Payload, "|")
-			if len(parts) != 2 {
-				continue
-			}
+		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("Redis watcher shutting down")
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				parts := strings.Split(msg.Payload, "|")
+				if len(parts) != 2 {
+					continue
+				}
 
-			serverURL, err := url.Parse(parts[0])
-			status := parts[1]
-			healthy := status == "UP"
-			if err != nil {
-				slog.Error(fmt.Sprintf("Error parsing URL '%s' from Redis: %v", parts[0], err))
-				continue
-			}
+				serverURL, err := url.Parse(parts[0])
+				status := parts[1]
+				healthy := status == "UP"
+				if err != nil {
+					slog.Error(fmt.Sprintf("Error parsing URL '%s' from Redis: %v", parts[0], err))
+					continue
+				}
 
-			slog.Info(fmt.Sprintf("Redis update received: %s is %s", serverURL.String(), status))
-			rm.pool.MarkHealthy(*serverURL, healthy)
+				slog.Info(fmt.Sprintf("Redis update received: %s is %s", serverURL.String(), status))
+				rm.pool.MarkHealthy(*serverURL, healthy)
+			}
 		}
 	}()
 }

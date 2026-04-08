@@ -97,8 +97,12 @@ func main() {
 	// Initialize with an empty pool; the DNS worker will populate it immediately.
 	sharedState := repository.NewInMemory([]url.URL{}, []int{})
 
+	// Cancellable context for all background goroutines — cancelled on SIGTERM/SIGINT.
+	ctx, cancelAll := context.WithCancel(context.Background())
+	defer cancelAll()
+
 	// Start Dynamic DNS Discovery in a background goroutine
-	discovery.StartDNSWatcher(context.Background(), hostname, port, scheme, defaultWeight, sharedState)
+	discovery.StartDNSWatcher(ctx, hostname, port, scheme, defaultWeight, sharedState)
 
 	// Redis is optional: if unavailable, the LB runs in degraded mode
 	// with local-only health state (no cross-instance sync).
@@ -123,10 +127,10 @@ func main() {
 			redisMgr.SyncOnStartUp()
 
 			// Periodic re-sync heals missed Pub/Sub messages.
-			redisMgr.StartPeriodicSync(context.Background(), 30*time.Second)
+			redisMgr.StartPeriodicSync(ctx, 30*time.Second)
 
 			// Subscribe to Pub/Sub for real-time cross-instance health updates.
-			redisMgr.StartRedisWatcher()
+			redisMgr.StartRedisWatcher(ctx)
 
 			updater = redisMgr
 		}
@@ -148,18 +152,24 @@ func main() {
 		config.AppConfig.HealthCheck.Interval,
 		config.AppConfig.HealthCheck.Timeout,
 	)
-	go checker.Start()
+	checker.Start(ctx)
 
 	// Metrics HTTP server on port+1000 (e.g., 9080 if LB is on 8080).
-	go startMetricsServer(collector, sharedState, config.AppConfig.LoadBalancer.Port+1000)
+	metricsServer := startMetricsServer(collector, sharedState, config.AppConfig.LoadBalancer.Port+1000)
 
 	// Time-series recorder: captures RPS and avg latency every 5 seconds.
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
-		for range ticker.C {
-			healthyCount, _ := sharedState.GetHealthy()
-			activeBackends := len(healthyCount)
-			collector.RecordTimeSeriesPoint(activeBackends)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				healthyCount, _ := sharedState.GetHealthy()
+				activeBackends := len(healthyCount)
+				collector.RecordTimeSeriesPoint(activeBackends)
+			}
 		}
 	}()
 
@@ -168,13 +178,18 @@ func main() {
 
 	server := &http.Server{Addr: addr, Handler: lb}
 
-	setupGracefulShutdown(collector, *metricsOut, server)
+	done := make(chan bool, 1)
+	setupGracefulShutdown(collector, *metricsOut, server, metricsServer, cancelAll, done)
 
 	slog.Info(fmt.Sprintf("Load balancer starting on %s with %s policy", addr, route.Policy))
 	slog.Info(fmt.Sprintf("Base discovery target: %s", route.Backends[0].Endpoint))
 	slog.Info(fmt.Sprintf("Metrics available at http://localhost:%d/metrics", config.AppConfig.LoadBalancer.Port+1000))
 
-	log.Fatal(server.ListenAndServe())
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+
+	<-done
 }
 
 // startMetricsServer runs an HTTP server exposing operational endpoints:
@@ -182,7 +197,7 @@ func main() {
 //   - GET /metrics/timeseries: JSON array of periodic time-series snapshots.
 //   - GET /metrics/export: CSV download of time-series data.
 //   - GET /health/backends: current health status of all registered backends.
-func startMetricsServer(collector *metrics.Collector, pool repository.SharedState, port int) {
+func startMetricsServer(collector *metrics.Collector, pool repository.SharedState, port int) *http.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -237,14 +252,28 @@ func startMetricsServer(collector *metrics.Collector, pool repository.SharedStat
 			return
 		}
 	})
+
 	addr := fmt.Sprintf(":%d", port)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error(fmt.Sprintf("Metrics server error: %v", err))
+		}
+	}()
+	return srv
 }
 
 // setupGracefulShutdown intercepts SIGINT and SIGTERM to persist metrics
 // before exit. ECS sends SIGTERM on task stop; this ensures experiment
 // data is not lost when scaling down LB instances.
-func setupGracefulShutdown(collector *metrics.Collector, outputFile string, server *http.Server) {
+func setupGracefulShutdown(
+	collector *metrics.Collector,
+	outputFile string,
+	server *http.Server,
+	metricsServer *http.Server,
+	cancelAll context.CancelFunc,
+	done chan bool,
+) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
@@ -252,31 +281,35 @@ func setupGracefulShutdown(collector *metrics.Collector, outputFile string, serv
 		<-c
 		slog.Info("Shutting down gracefully...")
 
+		// Cancel all background goroutines (health checker, DNS watcher,
+		// Redis watcher, time-series recorder, periodic sync).
+		cancelAll()
+
 		// Drain in-flight HTTP connections (10s timeout).
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
+		if err := server.Shutdown(shutdownCtx); err != nil {
 			slog.Error(fmt.Sprintf("HTTP server shutdown error: %v", err))
+		}
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			slog.Error(fmt.Sprintf("Metrics server shutdown error: %v", err))
 		}
 
 		summary := collector.GetSummary()
-		data, _ := json.MarshalIndent(summary, "", "  ")
-		err := os.WriteFile(outputFile, data, 0644)
-
-		if err != nil {
-			slog.Error(fmt.Sprintf("Metrics cannot be saved to %s", outputFile))
-		} else {
-			slog.Info(fmt.Sprintf("Metrics saved to %s", outputFile))
+		data, err := json.MarshalIndent(summary, "", "  ")
+		if err == nil {
+			if err := os.WriteFile(outputFile, data, 0644); err != nil {
+				slog.Error(fmt.Sprintf("Metrics cannot be saved to %s", outputFile))
+			} else {
+				slog.Info(fmt.Sprintf("Metrics saved to %s", outputFile))
+			}
 		}
 
 		csvFile := outputFile + ".csv"
-		err = collector.ExportCSV(csvFile)
-		if err != nil {
-			slog.Error(fmt.Sprintf("Time-series data cannot be saved to %s", csvFile))
-		} else {
+		if err := collector.ExportCSV(csvFile); err == nil {
 			slog.Info(fmt.Sprintf("Time-series data saved to %s", csvFile))
 		}
 
-		os.Exit(0)
+		done <- true
 	}()
 }

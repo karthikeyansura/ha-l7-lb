@@ -1,6 +1,7 @@
 package health
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -50,14 +51,21 @@ func NewChecker(pool *repository.InMemory, updater StatusUpdater, interval, time
 
 // Start runs an initial health check immediately, then launches a
 // background goroutine that repeats on a fixed interval.
-// This method does not block; the caller should invoke it with `go`.
-func (hc *Checker) Start() {
-	ticker := time.NewTicker(hc.interval)
+// The goroutine exits when ctx is cancelled. This method does not block.
+func (hc *Checker) Start(ctx context.Context) {
 	// Immediate first check so backends are validated before traffic arrives.
 	hc.checkAll()
 	go func() {
-		for range ticker.C {
-			hc.checkAll()
+		ticker := time.NewTicker(hc.interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("Health checker shutting down")
+				return
+			case <-ticker.C:
+				hc.checkAll()
+			}
 		}
 	}()
 	slog.Info("Health checker started", "interval", hc.interval)
