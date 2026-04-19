@@ -1,0 +1,15 @@
+Run: exp2b/retry_on_replicadrop (Exp 2 Part B - retry_on variant with mid-run replica drop)
+User class: ScalingBaselineUser
+Users: 200
+Duration: 10 min
+retries_enabled: true
+
+Backends: started at 4 tasks, dropped to 3 at T+150s
+Timezone: UTC
+
+Run start: 2026-04-18T07:25:21Z
+Run end:   2026-04-18T07:35:17Z
+Drop time: 2026-04-18T07:27:49Z (T+148s)
+
+Aggregate: 850,924 requests, 18 failures (0.002%), RPS 1420, p50 150ms, p95 180ms, p99 190ms
+Interpretation: retries_enabled=true cleanly masked the replica drop; only 18 failures over 850k requests.

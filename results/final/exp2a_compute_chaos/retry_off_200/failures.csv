@@ -1,0 +1,5 @@
+Method,Name,Error,Occurrences
+GET,/api/compute (chaos-delay-6000ms),CatchResponseError('Timeout/error: 504'),1668
+GET,/api/compute (chaos-delay-8000ms),CatchResponseError('Timeout/error: 504'),1731
+GET,/api/compute (chaos-delay-10000ms),CatchResponseError('Timeout/error: 504'),1708
+GET,/api/compute (chaos-500),CatchResponseError('Unexpected: 504'),5230

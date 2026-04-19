@@ -53,18 +53,23 @@ type ReverseProxy struct {
 	updater        health.StatusUpdater   // Redis-backed health state propagator.
 	transport      http.RoundTripper      // HTTP transport for backend requests.
 	timeout        time.Duration          // Backend request timeout from config.
+	retriesEnabled bool                   // Whether to retry idempotent requests on failure.
 	activeRequests int64                  // atomic: in-flight requests
 	activeRetries  int64                  // atomic: in-flight retry requests
 }
 
 // NewReverseProxy constructs a proxy wired to all subsystems.
-func NewReverseProxy(pool repository.SharedState, algorithm algorithms.Rule, collector *metrics.Collector, updater health.StatusUpdater, timeout time.Duration) *ReverseProxy {
+// retriesEnabled=false disables retry on idempotent methods; used by
+// Experiment 2's retries-disabled variant. When false, failed requests
+// return 504 on the first failure regardless of method.
+func NewReverseProxy(pool repository.SharedState, algorithm algorithms.Rule, collector *metrics.Collector, updater health.StatusUpdater, timeout time.Duration, retriesEnabled bool) *ReverseProxy {
 	return &ReverseProxy{
-		pool:      pool,
-		algo:      algorithm,
-		collector: collector,
-		updater:   updater,
-		timeout:   timeout,
+		pool:           pool,
+		algo:           algorithm,
+		collector:      collector,
+		updater:        updater,
+		timeout:        timeout,
+		retriesEnabled: retriesEnabled,
 		transport: &http.Transport{
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 20,
@@ -156,7 +161,10 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Retry logic: only for HTTP methods that are safe to re-execute.
 	// GET, PUT, DELETE are idempotent per RFC 7231. POST, PATCH are not.
-	if isIdempotent(r.Method) {
+	// retriesEnabled acts as a global kill switch for the retry path,
+	// letting Experiment 2 compare client-visible error rates with and
+	// without retry under chaos injection.
+	if lb.retriesEnabled && isIdempotent(r.Method) {
 		// Retry budget: skip retry if too many retries are already in-flight
 		currentTotal := atomic.LoadInt64(&lb.activeRequests)
 		currentRetries := atomic.LoadInt64(&lb.activeRetries)

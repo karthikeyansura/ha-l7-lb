@@ -1,0 +1,11 @@
+Method,Name,Error,Occurrences
+GET,/health,CatchResponseError('Health check failed: 503'),9068
+GET,/api/compute (chaos-delay-6000ms),CatchResponseError('Timeout/error: 504'),44
+GET,/api/compute (chaos-delay-8000ms),CatchResponseError('Timeout/error: 504'),46
+GET,/api/compute (chaos-delay-10000ms),CatchResponseError('Timeout/error: 503'),2881
+GET,/api/compute (normal),CatchResponseError('Failed: 503'),163698
+GET,/api/compute (chaos-delay-10000ms),CatchResponseError('Timeout/error: 504'),45
+GET,/api/compute (chaos-500),CatchResponseError('Unexpected: 503'),8939
+GET,/api/compute (chaos-500),CatchResponseError('Unexpected: 504'),157
+GET,/api/compute (chaos-delay-8000ms),CatchResponseError('Timeout/error: 503'),2984
+GET,/api/compute (chaos-delay-6000ms),CatchResponseError('Timeout/error: 503'),3014
