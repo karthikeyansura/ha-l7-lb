@@ -6,6 +6,10 @@
 load_balancer:
   port: 8080
   timeout: 5s
+  # retries_enabled: false disables retry on idempotent method failures.
+  # Overridden at runtime by RETRIES_ENABLED env var (ECS task definition)
+  # for Experiment 2's retries-disabled variant.
+  retries_enabled: true
 
 route:
   # Changeable per experiment: round-robin | least-connections | weighted

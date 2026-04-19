@@ -1,0 +1,4 @@
+2026-04-17T22:17:28Z
+Config: policy=weighted, strong weight=70, weak weight=30
+Users: 500, Spawn rate: 50/s, Duration: 5 min
+User class: AlgorithmCompareUser
