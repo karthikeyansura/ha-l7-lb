@@ -55,9 +55,12 @@ resource "aws_service_discovery_private_dns_namespace" "internal" {
   vpc         = module.network.vpc_id
 }
 
-# --- Dynamic Scalable Backend ---
+# --- Homogeneous Backend (Exp 2/3 baseline) ---
+#
+# Single Cloud Map service, single ECS cluster of identical backends.
+# For dual-tier (weighted heterogeneous) experiments, swap back to the
+# dual-tier block in git history (commit cccea8c on exp/1-weighted-hetero).
 
-# A single Cloud Map service. All backend tasks will register here.
 resource "aws_service_discovery_service" "backend" {
   name = "api"
   dns_config {
@@ -69,7 +72,6 @@ resource "aws_service_discovery_service" "backend" {
   }
 }
 
-# The unified ECS backend cluster
 module "ecs_backend" {
   source               = "./modules/ecs-backend"
   service_name         = "api-backend"
@@ -86,7 +88,6 @@ module "ecs_backend" {
   depends_on           = [docker_registry_image.backend]
 }
 
-# Autoscaling policy linked to the unified backend cluster
 module "autoscaling_backend" {
   source           = "./modules/autoscaling"
   service_name     = "api-backend"
@@ -113,10 +114,40 @@ module "ecs_lb" {
   region             = var.aws_region
   target_group_arn   = module.nlb.target_group_arn
   redis_addr         = module.elasticache.redis_endpoint
+  retries_enabled    = var.retries_enabled
   depends_on         = [docker_registry_image.lb]
 }
 
 # --- Docker Builds ---
+#
+# Docker images rebuild when ANY tracked source file changes. Without a
+# trigger, the docker provider only notices name/path changes, so
+# changing config.yaml or *.go code silently uses the cached image on
+# the next apply. The triggers hash the build context so content
+# changes force a fresh build and ECR push.
+
+locals {
+  lb_build_hash = sha1(join("", [
+    for f in setunion(
+      fileset("../", "cmd/lb/**/*.go"),
+      fileset("../", "internal/**/*.go"),
+      fileset("../", "config.yaml"),
+      fileset("../", "Dockerfile.lb"),
+      fileset("../", "go.mod"),
+      fileset("../", "go.sum"),
+    ) : filesha1("../${f}")
+  ]))
+
+  backend_build_hash = sha1(join("", [
+    for f in setunion(
+      fileset("../", "cmd/backend/**/*.go"),
+      fileset("../", "internal/**/*.go"),
+      fileset("../", "Dockerfile.backend"),
+      fileset("../", "go.mod"),
+      fileset("../", "go.sum"),
+    ) : filesha1("../${f}")
+  ]))
+}
 
 resource "docker_image" "lb" {
   name = "${module.ecr_lb.repository_url}:latest"
@@ -124,10 +155,12 @@ resource "docker_image" "lb" {
     context    = "../"
     dockerfile = "Dockerfile.lb"
   }
+  triggers = { src_hash = local.lb_build_hash }
 }
 
 resource "docker_registry_image" "lb" {
-  name = docker_image.lb.name
+  name     = docker_image.lb.name
+  triggers = { src_hash = local.lb_build_hash }
 }
 
 resource "docker_image" "backend" {
@@ -136,8 +169,24 @@ resource "docker_image" "backend" {
     context    = "../"
     dockerfile = "Dockerfile.backend"
   }
+  triggers = { src_hash = local.backend_build_hash }
 }
 
 resource "docker_registry_image" "backend" {
-  name = docker_image.backend.name
+  name     = docker_image.backend.name
+  triggers = { src_hash = local.backend_build_hash }
+}
+
+# --- Locust Load Generator ---
+#
+# Single EC2 in the default VPC that runs Locust in headless mode.
+# Driven remotely via `aws ssm send-command`; results land in S3.
+
+module "locust" {
+  source               = "./modules/locust"
+  service_name         = var.service_name
+  vpc_id               = module.network.vpc_id
+  subnet_id            = module.network.subnet_ids[0]
+  nlb_dns_name         = module.nlb.nlb_dns_name
+  lb_security_group_id = module.network.lb_security_group_id
 }

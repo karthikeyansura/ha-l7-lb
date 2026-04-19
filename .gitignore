@@ -4,18 +4,26 @@
 *.exe
 *.out
 
-# Metrics output
-*.json
-*.csv
+# Metrics output (project-root only — keep results/ tracked)
+/*.json
+/*.csv
+metrics.json
+metrics.json.csv
 
 # Terraform
 terraform/.terraform/
 terraform/*.tfstate
 terraform/*.tfstate.backup
 terraform/.terraform.lock.hcl
+terraform/.terraform.tfstate.lock.info
 terraform/*.tfvars
 terraform/crash.log
 terraform/crash.*.log
+terraform/tfplan.*
+terraform/*.bak
+
+# Claude Code session state
+.claude/
 
 # Python / Locust
 __pycache__/

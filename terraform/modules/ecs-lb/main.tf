@@ -21,8 +21,12 @@ resource "aws_ecs_task_definition" "this" {
     portMappings = [{ containerPort = var.container_port }]
 
     # REDIS_ADDR env var overrides config.yaml's redis.addr field.
-    # Value is the ElastiCache endpoint output (e.g., "host.cache.amazonaws.com:6379").
-    environment = [{ name = "REDIS_ADDR", value = var.redis_addr }]
+    # RETRIES_ENABLED env var overrides config.yaml's load_balancer.retries_enabled;
+    # flipped to "false" during Experiment 2's retries-disabled variant.
+    environment = [
+      { name = "REDIS_ADDR", value = var.redis_addr },
+      { name = "RETRIES_ENABLED", value = tostring(var.retries_enabled) },
+    ]
 
     logConfiguration = {
       logDriver = "awslogs"

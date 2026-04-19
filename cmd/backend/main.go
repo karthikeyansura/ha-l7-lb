@@ -59,25 +59,8 @@ func main() {
 	http.HandleFunc("/api/data", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[%s] Received %s request from %s", serverID, r.Method, r.RemoteAddr)
 
-		// Chaos: forced error code. Checked before any processing.
-		if chaos := r.Header.Get("X-Chaos-Error"); chaos != "" {
-			code, err := strconv.Atoi(chaos)
-			if err == nil && code >= 400 {
-				log.Printf("[%s] Chaos: returning %d", serverID, code)
-				w.WriteHeader(code)
-				_, _ = fmt.Fprintf(w, "Chaos error %d from %s\n", code, serverID)
-				return
-			}
-		}
-
-		// Chaos: artificial latency. Sleeps before response, may exceed
-		// the proxy's timeout and trigger a retry.
-		if delay := r.Header.Get("X-Chaos-Delay"); delay != "" {
-			ms, err := strconv.Atoi(delay)
-			if err == nil && ms > 0 {
-				log.Printf("[%s] Chaos: sleeping %dms", serverID, ms)
-				time.Sleep(time.Duration(ms) * time.Millisecond)
-			}
+		if handleChaos(w, r, serverID) {
+			return
 		}
 
 		// Baseline variable latency (5-25ms) simulating real workload variance.
@@ -95,7 +78,15 @@ func main() {
 	// Accepts an optional ?iterations=N query parameter (default 50000).
 	// On a 256-CPU Fargate task this takes ~100-300ms, producing measurable
 	// latency differences between strong and weak backends.
+	//
+	// Also honors chaos headers (X-Chaos-Error, X-Chaos-Delay) via handleChaos
+	// for Experiment 2 CPU-heavy variant: same retry/failure semantics as
+	// /api/data but on a workload that stresses backend CPU.
 	http.HandleFunc("/api/compute", func(w http.ResponseWriter, r *http.Request) {
+		if handleChaos(w, r, serverID) {
+			return
+		}
+
 		iterations := 50000
 		if v := r.URL.Query().Get("iterations"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500000 {
@@ -159,6 +150,37 @@ func main() {
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("%s starting on %s", serverID, addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
+}
+
+// handleChaos honors the X-Chaos-Error and X-Chaos-Delay headers used by
+// Experiment 2. Returns true if the request was fully handled (a forced
+// error response was written), in which case the caller must return
+// immediately. Returns false otherwise — any sleep from X-Chaos-Delay
+// has already happened before return, and the caller continues with the
+// endpoint's normal workload.
+func handleChaos(w http.ResponseWriter, r *http.Request, serverID string) bool {
+	// Chaos: forced error code. Checked before any processing.
+	if chaos := r.Header.Get("X-Chaos-Error"); chaos != "" {
+		code, err := strconv.Atoi(chaos)
+		if err == nil && code >= 400 {
+			log.Printf("[%s] Chaos: returning %d", serverID, code)
+			w.WriteHeader(code)
+			_, _ = fmt.Fprintf(w, "Chaos error %d from %s\n", code, serverID)
+			return true
+		}
+	}
+
+	// Chaos: artificial latency. Sleeps before response, may exceed
+	// the proxy's timeout and trigger a retry.
+	if delay := r.Header.Get("X-Chaos-Delay"); delay != "" {
+		ms, err := strconv.Atoi(delay)
+		if err == nil && ms > 0 {
+			log.Printf("[%s] Chaos: sleeping %dms", serverID, ms)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+	}
+
+	return false
 }
 
 // getLocalIP returns the first non-loopback, non-link-local IPv4 address

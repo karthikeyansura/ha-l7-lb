@@ -52,6 +52,16 @@ resource "aws_security_group" "lb" {
     description = "Allow traffic from NLB"
   }
 
+  # LB metrics endpoint (port+1000). VPC-internal only. Used by
+  # capture_lb_metrics.sh via SSM from the Locust EC2 in the same VPC.
+  ingress {
+    from_port   = var.lb_port + 1000
+    to_port     = var.lb_port + 1000
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
+    description = "Allow VPC-internal access to LB metrics endpoint"
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
