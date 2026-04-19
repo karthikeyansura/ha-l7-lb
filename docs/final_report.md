@@ -462,7 +462,7 @@ Compared to production L7 load balancers (NGINX, HAProxy, Envoy), our implementa
 
 ## 9. Appendix — Data pointer
 
-Every claim in this report is traceable to a file under `results/` (subfolders: `final/` for Phase 2-5 runs, `milestone_1/` for the core /api/data algorithm comparison, and `figures/` for Python-generated charts). Each run folder typically contains `stats.csv` (aggregated Locust stats), `stats_history.csv` (10-second time-series), `failures.csv` (error breakdown), `report.html` (self-contained Locust report), and `dashboard.png` (CloudWatch dashboard for the run's UTC window). Runs marked with `_mid`/`_end` suffixes additionally contain `lb_snapshots/` with the LB's own `/metrics`, `/health/backends`, and `metrics/export` JSON/CSV captured via SSM.
+Every claim in this report is traceable to a file under `results/` (subfolders: `final/` for Phase 2-5 runs, `milestone_1/` for the core /api/data algorithm comparison, and `figures/` for Python-generated charts). Each run folder typically contains `stats.csv` (aggregated Locust stats), `stats_history.csv` (10-second time-series), `failures.csv` (error breakdown), and `dashboard.png` (CloudWatch dashboard for the run's UTC window). Runs marked with `_mid`/`_end` suffixes additionally contain `lb_snapshots/` with the LB's own `/metrics`, `/health/backends`, and `metrics/export` JSON/CSV captured via SSM.
 
 | Section | Data location |
 |---|---|
