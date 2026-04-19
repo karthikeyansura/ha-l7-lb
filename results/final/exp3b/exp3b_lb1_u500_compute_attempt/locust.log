@@ -1,0 +1,35 @@
+[2026-04-18 01:04:07,833] ip-172-31-16-143/INFO/locust.main: Starting Locust 2.34.0
+[2026-04-18 01:04:07,833] ip-172-31-16-143/WARNING/locust.main: Python 3.9 support is deprecated and will be removed soon
+[2026-04-18 01:04:07,834] ip-172-31-16-143/INFO/locust.main: Run time limit set to 300 seconds
+[2026-04-18 01:04:07,837] ip-172-31-16-143/INFO/locust.runners: Ramping to 500 users at a rate of 50.00 per second
+[2026-04-18 01:04:16,858] ip-172-31-16-143/INFO/locust.runners: All users spawned: {"ScalingBaselineComputeUser": 500} (500 total users)
+[2026-04-18 01:06:57,854] ip-172-31-16-143/WARNING/root: CPU usage above 90%! This may constrain your throughput and may even give inconsistent response time measurements! See https://docs.locust.io/en/stable/running-distributed.html for how to distribute the load over multiple CPU cores or machines
+[2026-04-18 01:09:07,701] ip-172-31-16-143/INFO/locust.main: --run-time limit reached, shutting down
+[2026-04-18 01:09:07,776] ip-172-31-16-143/WARNING/locust.runners: CPU usage was too high at some point during the test! See https://docs.locust.io/en/stable/running-distributed.html for how to distribute the load over multiple CPU cores or machines
+[2026-04-18 01:09:07,850] ip-172-31-16-143/INFO/locust.main: writing html report to file: run-exp3b_lb1_u500_compute.html
+[2026-04-18 01:09:07,852] ip-172-31-16-143/INFO/locust.main: Shutting down (exit code 1)
+Type     Name                                                                          # reqs      # fails |    Avg     Min     Max    Med |   req/s  failures/s
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+GET      /api/compute                                                                  738564 738173(99.95%) |    139       0  185034     38 | 2462.44     2461.14
+GET      /health                                                                        82209 82109(99.88%) |    146       0  185033     38 |  274.09      273.76
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+         Aggregated                                                                    820773 820282(99.94%) |    140       0  185034     38 | 2736.54     2734.90
+
+Response time percentiles (approximated)
+Type     Name                                                                                  50%    66%    75%    80%    90%    95%    98%    99%  99.9% 99.99%   100% # reqs
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+GET      /api/compute                                                                           38     48     54     58     69     78     95   1500   5300 180000 185000 738564
+GET      /health                                                                                38     48     54     58     69     78     94   1200   5300 180000 185000  82209
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+         Aggregated                                                                             38     48     54     58     69     78     95   1400   5300 180000 185000 820773
+
+Error report
+# occurrences      Error                                                                                               
+------------------|---------------------------------------------------------------------------------------------------------------------------------------------
+6815               GET /api/compute: Compute failed: 504                                                               
+731358             GET /api/compute: Compute failed: 503                                                               
+81403              GET /health: Health check failed: 503                                                               
+706                GET /health: Health check failed: 504                                                               
+------------------|---------------------------------------------------------------------------------------------------------------------------------------------
+
+failed to run commands: exit status 1

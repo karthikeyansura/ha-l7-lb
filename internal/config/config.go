@@ -9,6 +9,8 @@
 //   - REDIS_ADDR overrides redis.addr from YAML. This is how the ECS
 //     task definition injects the ElastiCache endpoint at runtime.
 //   - REDIS_PASSWORD overrides redis.password (for authenticated clusters).
+//   - RETRIES_ENABLED overrides load_balancer.retries_enabled. Used by
+//     Experiment 2 to toggle retry behavior without rebuilding the image.
 //
 // If REDIS_ADDR is set but no redis block exists in YAML, a redis
 // config struct is created dynamically so the LB can run with only
@@ -19,6 +21,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +35,11 @@ type Config struct {
 	LoadBalancer struct {
 		Port    int           `yaml:"port"`
 		Timeout time.Duration `yaml:"timeout"`
+		// RetriesEnabled controls whether the proxy retries failed idempotent
+		// requests on an alternate backend. Defaults to true (retry enabled)
+		// if omitted. Flip to false for Experiment 2's retries-disabled variant
+		// via the RETRIES_ENABLED env var.
+		RetriesEnabled bool `yaml:"retries_enabled"`
 	} `yaml:"load_balancer"`
 
 	Route struct {
@@ -68,6 +76,9 @@ var (
 func Load(configPath string) {
 	once.Do(func() {
 		AppConfig = &Config{}
+		// Default RetriesEnabled to true; YAML unmarshal only overrides
+		// if the key is present in the file, so omission means "default on".
+		AppConfig.LoadBalancer.RetriesEnabled = true
 
 		data, err := os.ReadFile(configPath)
 		if err != nil {
@@ -77,6 +88,17 @@ func Load(configPath string) {
 		err = yaml.Unmarshal(data, AppConfig)
 		if err != nil {
 			log.Fatalf("Error parsing config file: %v", err)
+		}
+
+		// RETRIES_ENABLED env var override: enables flipping retry behavior
+		// via ECS task definition without rebuilding the image (Experiment 2).
+		if v := os.Getenv("RETRIES_ENABLED"); v != "" {
+			switch strings.ToLower(v) {
+			case "true", "1", "yes":
+				AppConfig.LoadBalancer.RetriesEnabled = true
+			case "false", "0", "no":
+				AppConfig.LoadBalancer.RetriesEnabled = false
+			}
 		}
 
 		// REDIS_ADDR override: enables container-native configuration

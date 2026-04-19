@@ -48,6 +48,12 @@ variable "redis_addr" {
   type        = string
 }
 
+variable "retries_enabled" {
+  description = "Whether the LB retries failed idempotent requests. Injected as RETRIES_ENABLED env var; used by Experiment 2."
+  type        = bool
+  default     = true
+}
+
 variable "cpu" {
   type    = string
   default = "256"
