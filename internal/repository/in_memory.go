@@ -7,23 +7,15 @@ import (
 	"time"
 )
 
-// InMemory is the local, single-process implementation of SharedState.
-// Each LB instance maintains its own InMemory; cross-instance consistency
-// is achieved via Redis Pub/Sub (see redismanager package).
-//
-// Concurrency model: a sync.RWMutex protects the servers slice.
-// Read operations (GetAllServers, GetHealthy) acquire RLock, allowing
-// concurrent readers. Write operations (MarkHealthy, Add/RemoveConnections)
-// acquire a full Lock. ActiveConnections is additionally protected by
-// atomic operations at the field level for lock-free reads from algorithms.
+// InMemory is the local implementation of SharedState. Cross-instance
+// consistency is achieved via Redis Pub/Sub (see redismanager package).
+// A sync.RWMutex protects the servers slice.
 type InMemory struct {
 	mu      sync.RWMutex
 	servers []*ServerState
 }
 
-// NewInMemory constructs the backend pool from a list of URLs and weights.
-// All servers start as Healthy. The servers and weights slices must be
-// equal in length; index i of weights corresponds to index i of servers.
+// NewInMemory constructs the pool from URLs and weights. All servers start healthy.
 func NewInMemory(servers []url.URL, weights []int) *InMemory {
 	serverStates := make([]*ServerState, 0, len(servers))
 	for i, server := range servers {
@@ -41,9 +33,6 @@ func NewInMemory(servers []url.URL, weights []int) *InMemory {
 }
 
 // GetAllServers returns a shallow copy of the server slice.
-// The copy prevents callers from mutating the internal slice,
-// but the pointed-to ServerState structs are shared (intentional:
-// the health checker reads the Healthy field from these pointers).
 func (i *InMemory) GetAllServers() ([]*ServerState, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -54,9 +43,7 @@ func (i *InMemory) GetAllServers() ([]*ServerState, error) {
 	return result, nil
 }
 
-// GetHealthy filters to servers with Healthy == true.
-// Returns an empty (non-nil) slice when all backends are down,
-// which the proxy interprets as 503 Service Unavailable.
+// GetHealthy returns servers with Healthy == true.
 func (i *InMemory) GetHealthy() ([]*ServerState, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -71,10 +58,6 @@ func (i *InMemory) GetHealthy() ([]*ServerState, error) {
 }
 
 // MarkHealthy updates the Healthy flag and LastCheck timestamp.
-// No-op if the URL does not match any registered server.
-// This is called from two sources:
-//   - The health checker, on periodic /health probe results.
-//   - The Redis Pub/Sub watcher, when another LB instance detects a failure.
 func (i *InMemory) MarkHealthy(serverURL url.URL, healthy bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -89,8 +72,6 @@ func (i *InMemory) MarkHealthy(serverURL url.URL, healthy bool) {
 }
 
 // AddConnections increments the active connection counter for a backend.
-// The mutex is acquired to locate the correct ServerState by URL;
-// the actual counter mutation uses atomic.AddInt64 inside AddConnections.
 func (i *InMemory) AddConnections(serverURL url.URL, connections int64) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -103,7 +84,7 @@ func (i *InMemory) AddConnections(serverURL url.URL, connections int64) {
 	}
 }
 
-// RemoveConnections decrements by passing a negated value to AddConnections.
+// RemoveConnections decrements the active connection counter.
 func (i *InMemory) RemoveConnections(serverURL url.URL, connections int64) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -116,7 +97,7 @@ func (i *InMemory) RemoveConnections(serverURL url.URL, connections int64) {
 	}
 }
 
-// SyncServers reconciles the current server pool with a newly discovered list of URLs.
+// SyncServers reconciles the pool with a newly discovered list of URLs.
 func (i *InMemory) SyncServers(activeURLs []url.URL, defaultWeight int) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -150,9 +131,7 @@ func (i *InMemory) SyncServers(activeURLs []url.URL, defaultWeight int) {
 		}
 	}
 
-	// Backends no longer in DNS: drain rather than drop immediately.
-	// Backends with active connections are kept as draining and unhealthy.
-	// Backends whose connections have drained to 0 are removed from the pool.
+	// Drain backends no longer in DNS; drop those with zero connections.
 	for _, s := range i.servers {
 		if !activeSet[s.ServerURL.String()] {
 			if s.GetActiveConnections() > 0 {
@@ -169,11 +148,8 @@ func (i *InMemory) SyncServers(activeURLs []url.URL, defaultWeight int) {
 	i.servers = newServers
 }
 
-// SyncServersBySource reconciles the pool for a single DNS source.
-// Only servers with a matching SourceTag are affected; other sources'
-// servers are preserved. This enables multiple DNS watchers (e.g.,
-// api-strong.internal and api-weak.internal) to coexist in one pool
-// without overwriting each other.
+// SyncServersBySource reconciles the pool for a single DNS source,
+// preserving servers from other sources.
 func (i *InMemory) SyncServersBySource(sourceTag string, activeURLs []url.URL, weight int) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -190,7 +166,6 @@ func (i *InMemory) SyncServersBySource(sourceTag string, activeURLs []url.URL, w
 		}
 	}
 
-	// Keep all servers from OTHER sources untouched.
 	newServers := make([]*ServerState, 0, len(i.servers))
 	for _, s := range i.servers {
 		if s.SourceTag != sourceTag {
@@ -198,7 +173,6 @@ func (i *InMemory) SyncServersBySource(sourceTag string, activeURLs []url.URL, w
 		}
 	}
 
-	// Add/update servers for THIS source.
 	for _, u := range activeURLs {
 		urlStr := u.String()
 		if existing, found := existingMap[urlStr]; found {
@@ -217,7 +191,6 @@ func (i *InMemory) SyncServersBySource(sourceTag string, activeURLs []url.URL, w
 		}
 	}
 
-	// Drain removed backends from this source.
 	for _, s := range i.servers {
 		if s.SourceTag == sourceTag && !activeSet[s.ServerURL.String()] {
 			if s.GetActiveConnections() > 0 {

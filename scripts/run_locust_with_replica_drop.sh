@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
-# Run Locust for N minutes, drop one backend replica mid-run for Exp 2 Part B.
+# Run Locust and drop a backend replica mid-run (Exp 2b).
 #
-# Usage:
-#   ./scripts/run_locust_with_replica_drop.sh <run_id> <user_class> <users> <duration_min> <drop_at_sec> <final_desired_count>
-#
-# Example:
-#   ./scripts/run_locust_with_replica_drop.sh exp2b/retry_on_replicadrop ScalingBaselineUser 200 10 150 3
-#
-# This starts Locust in the background, waits `drop_at_sec` seconds,
-# then executes `aws ecs update-service --desired-count N` to drop
-# one backend replica during the run. The recorded stats_history.csv
-# will contain the transition interval.
+# Usage: ./scripts/run_locust_with_replica_drop.sh <run_id> <user_class> <users> <duration_min> <drop_at_sec> <final_desired_count>
+# Example: ./scripts/run_locust_with_replica_drop.sh exp2b/retry_on_replicadrop ScalingBaselineUser 200 10 150 3
 
 set -euo pipefail
 

@@ -1,20 +1,6 @@
-# CloudWatch dashboard with every panel worth screenshotting per run.
-#
-# One dashboard covers all three experiments — per-run discipline is
-# simply setting the time range to the 5-minute run window before
-# taking a screenshot.
-#
-# Panels:
-#   1. LB ECS service CPU + memory utilization
-#   2. Backend strong ECS service CPU + memory (dual-tier branches)
-#   3. Backend weak ECS service CPU + memory (dual-tier branches)
-#   4. ElastiCache Redis CPU, Engine CPU, network throughput
-#   5. NLB active flows + new flows + processed bytes
-#
-# When the branch uses a single homogeneous backend tier (main / exp2 /
-# exp3), the strong/weak panels will show "No data" — that's fine; the
-# dashboard JSON is shared across branches to keep the screenshot URL
-# stable.
+# CloudWatch dashboard covering all three experiments. Set the time range
+# to the run window before screenshotting. Panels: LB CPU/memory,
+# Backend strong/weak/homogeneous CPU/memory, Redis CPU/network, NLB flows.
 
 resource "aws_cloudwatch_dashboard" "ops" {
   dashboard_name = "${var.service_name}-ops"

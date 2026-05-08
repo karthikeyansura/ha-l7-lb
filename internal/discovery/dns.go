@@ -15,9 +15,7 @@ import (
 )
 
 // StartDNSWatcher periodically resolves the target DNS name and updates
-// the shared pool. Each watcher is scoped by sourceTag so multiple DNS
-// sources (e.g., api-strong.internal and api-weak.internal) can coexist
-// without overwriting each other's backends.
+// the shared pool, scoped by sourceTag to support multiple DNS sources.
 func StartDNSWatcher(ctx context.Context, sourceTag, targetHostname, port, scheme string, weight int, pool repository.SharedState) {
 	ticker := time.NewTicker(5 * time.Second)
 	go func() {

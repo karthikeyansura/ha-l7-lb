@@ -34,7 +34,7 @@ func threeBackendPool() repository.SharedState {
 	)
 }
 
-// --- RoundRobin ---
+// RoundRobin
 
 func TestRoundRobin_CyclesThroughBackends(t *testing.T) {
 	pool := threeBackendPool()
@@ -93,7 +93,7 @@ func TestRoundRobin_ConcurrentSafety(t *testing.T) {
 	}
 }
 
-// --- LeastConnections ---
+// LeastConnections
 
 func TestLeastConnections_SelectsLowest(t *testing.T) {
 	urls := []url.URL{
@@ -142,7 +142,7 @@ func TestLeastConnections_NoHealthyServers(t *testing.T) {
 	}
 }
 
-// --- Weighted ---
+// Weighted
 
 func TestWeighted_RespectsWeightDistribution(t *testing.T) {
 	urls := []url.URL{
@@ -185,7 +185,7 @@ func TestWeighted_NoHealthyServers(t *testing.T) {
 	}
 }
 
-// --- Shared: skips unhealthy backends ---
+// Shared: skips unhealthy backends
 
 func TestAlgorithms_SkipUnhealthyBackends(t *testing.T) {
 	urls := []url.URL{

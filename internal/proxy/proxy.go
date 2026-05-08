@@ -1,25 +1,9 @@
-// Package proxy implements the Layer 7 reverse proxy with automatic
-// retry logic for idempotent HTTP methods.
+// Package proxy implements the L7 reverse proxy with retry logic.
 //
-// Request lifecycle:
-//  1. Buffer the request body (required for retries; the body stream
-//     is consumed on the first read and must be replayed).
-//  2. Check that at least one healthy backend exists (503 if not).
-//  3. Select a backend via the configured algorithm.
-//  4. Increment the backend's active connection counter.
-//  5. Forward the request with the configured timeout.
-//  6. On success: record metrics, return response to client.
-//  7. On failure for idempotent methods (GET, PUT, DELETE):
-//     a. Mark the failed backend as DOWN locally and via Redis.
-//     b. Select a different backend from the remaining healthy set.
-//     c. Retry once on the new backend.
-//  8. On failure for non-idempotent methods (POST, PATCH):
-//     fall through to a 504 Gateway Timeout. No retry is attempted
-//     because re-executing a non-idempotent request could produce
-//     duplicate side effects (e.g., double order creation).
-//
-// This retry-on-idempotent design is the core feature evaluated in
-// Experiment 2 (Failure Isolation and Retry Efficacy under Chaos).
+// Request lifecycle: buffer body → select backend → forward with timeout →
+// on failure for idempotent methods (GET, PUT, DELETE), mark backend DOWN
+// and retry once on a different backend. Non-idempotent methods (POST,
+// PATCH) are never retried. A 20% retry budget caps retry amplification.
 package proxy
 
 import (
@@ -44,24 +28,20 @@ import (
 const maxBodySize = 10 << 20 // 10 MB payload limit to prevent OOM on buffered retries
 const retryBudgetPct = 0.20  // max 20% of in-flight requests may be retries
 
-// ReverseProxy implements http.Handler. Each incoming request is routed
-// to a backend, proxied, and optionally retried on failure.
+// ReverseProxy implements http.Handler.
 type ReverseProxy struct {
-	pool           repository.SharedState // Backend server pool (InMemory, synced via Redis).
-	algo           algorithms.Rule        // Pluggable routing algorithm.
-	collector      *metrics.Collector     // Request-level metrics accumulator.
-	updater        health.StatusUpdater   // Redis-backed health state propagator.
-	transport      http.RoundTripper      // HTTP transport for backend requests.
-	timeout        time.Duration          // Backend request timeout from config.
-	retriesEnabled bool                   // Whether to retry idempotent requests on failure.
-	activeRequests int64                  // atomic: in-flight requests
-	activeRetries  int64                  // atomic: in-flight retry requests
+	pool           repository.SharedState
+	algo           algorithms.Rule
+	collector      *metrics.Collector
+	updater        health.StatusUpdater
+	transport      http.RoundTripper
+	timeout        time.Duration
+	retriesEnabled bool
+	activeRequests int64
+	activeRetries  int64
 }
 
 // NewReverseProxy constructs a proxy wired to all subsystems.
-// retriesEnabled=false disables retry on idempotent methods; used by
-// Experiment 2's retries-disabled variant. When false, failed requests
-// return 504 on the first failure regardless of method.
 func NewReverseProxy(pool repository.SharedState, algorithm algorithms.Rule, collector *metrics.Collector, updater health.StatusUpdater, timeout time.Duration, retriesEnabled bool) *ReverseProxy {
 	return &ReverseProxy{
 		pool:           pool,
@@ -78,17 +58,12 @@ func NewReverseProxy(pool repository.SharedState, algorithm algorithms.Rule, col
 	}
 }
 
-// ServeHTTP is the main request handler invoked by the HTTP server.
-//
-// Body buffering: the entire request body is read into memory before
-// forwarding. This is necessary because io.ReadCloser is single-use;
-// a retry requires replaying the body from the buffer. The trade-off
-// is increased memory usage proportional to request body size.
+// ServeHTTP handles each incoming request: buffers the body for potential
+// retry, selects a backend, forwards, and retries on failure if eligible.
 func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt64(&lb.activeRequests, 1)
 	defer atomic.AddInt64(&lb.activeRequests, -1)
 
-	// Buffer request body for potential retry replay.
 	var bodyBytes []byte
 	var err error
 	if r.Body != nil {
@@ -110,8 +85,6 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// resetBody replaces the consumed body with a fresh reader from the buffer
-	// and restores ContentLength so backends receive the correct header.
 	resetBody := func(req *http.Request) {
 		if bodyBytes != nil {
 			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
@@ -124,24 +97,20 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	startTime := time.Now()
 
-	// Early exit if no backends are available.
 	healthyCheck, _ := lb.pool.GetHealthy()
 	if len(healthyCheck) == 0 {
 		http.Error(w, "No healthy backends", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Select backend via configured algorithm (round-robin, least-connections, weighted).
 	backendURL, err := lb.algo.GetTarget(&lb.pool, r)
 	if err != nil {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Track active connection for LeastConnections routing accuracy.
 	lb.pool.AddConnections(backendURL, 1)
 
-	// First attempt.
 	resetBody(r)
 	err = lb.proxyRequest(w, r, &backendURL)
 	lb.pool.RemoveConnections(backendURL, 1)
@@ -153,28 +122,19 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	slog.Error(fmt.Sprintf("Request to %s failed: %v", backendURL.String(), err))
 
-	// Client-side disconnects are not backend failures; do not retry or mark DOWN.
 	if isClientDisconnect(err) {
 		lb.collector.RecordRequest(backendURL.String(), time.Since(startTime), false, false, false)
 		return
 	}
 
-	// Retry logic: only for HTTP methods that are safe to re-execute.
-	// GET, PUT, DELETE are idempotent per RFC 7231. POST, PATCH are not.
-	// retriesEnabled acts as a global kill switch for the retry path,
-	// letting Experiment 2 compare client-visible error rates with and
-	// without retry under chaos injection.
+	// Retry for idempotent methods only (GET, PUT, DELETE per RFC 7231).
 	if lb.retriesEnabled && isIdempotent(r.Method) {
-		// Retry budget: skip retry if too many retries are already in-flight
 		currentTotal := atomic.LoadInt64(&lb.activeRequests)
 		currentRetries := atomic.LoadInt64(&lb.activeRetries)
 		if currentTotal > 0 && float64(currentRetries)/float64(currentTotal) > retryBudgetPct {
 			slog.Warn("Retry budget exceeded, skipping retry",
 				"activeRequests", currentTotal, "activeRetries", currentRetries)
 		} else {
-			// Debounce: only mark DOWN and propagate if the backend is still
-			// considered healthy. Under concurrent failures, the first goroutine
-			// to reach this point handles the update; subsequent ones skip it.
 			alreadyDown := false
 			if servers, sErr := lb.pool.GetAllServers(); sErr == nil {
 				for _, s := range servers {
@@ -199,7 +159,6 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}(backendURL.String())
 			}
 
-			// Re-fetch healthy backends to reflect the just-marked-DOWN state.
 			freshHealthy, _ := lb.pool.GetHealthy()
 			newBackendURL := lb.selectDifferent(freshHealthy, &backendURL, r)
 			if newBackendURL != nil {
@@ -217,13 +176,12 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				err = lb.proxyRequest(w, r, newBackendURL)
 
 				if err == nil {
-					// Record as retried=true so the retry rate metric is accurate.
 					lb.collector.RecordRequest(newBackendURL.String(), time.Since(retryStart), true, false, true)
 					return
 				}
 				slog.Error(fmt.Sprintf("Retry on %s also failed: %v", newBackendURL.String(), err))
 			}
-		} // end of else (budget not exceeded)
+		}
 	}
 
 	// Both attempts failed, or method is non-idempotent.
@@ -233,22 +191,18 @@ func (lb *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
 }
 
-// proxyRequest forwards a single HTTP request to the destination backend.
-// A context timeout (configured via load_balancer.timeout) prevents slow
-// backends from holding proxy goroutines indefinitely. On timeout, a typed TimeoutError is returned
-// so callers can distinguish timeouts from connection failures.
+// proxyRequest forwards a request to the destination backend with a
+// context timeout. Returns TimeoutError on deadline exceeded.
 func (lb *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, destURL *url.URL) error {
 	ctx, cancel := context.WithTimeout(r.Context(), lb.timeout)
 	defer cancel()
 
-	// Clone request with the timeout context.
 	outReq := r.WithContext(ctx)
 
-	// Rewrite URL to target the selected backend.
 	outReq.URL.Scheme = destURL.Scheme
 	outReq.URL.Host = destURL.Host
 	outReq.Host = destURL.Host
-	outReq.RequestURI = "" // Required by http.Transport: must not be set on client requests.
+	outReq.RequestURI = ""
 
 	resp, err := lb.transport.RoundTrip(outReq)
 	if err != nil {
@@ -264,33 +218,23 @@ func (lb *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, des
 		}
 	}(resp.Body)
 
-	// Treat 5xx responses as backend errors to trigger retry logic.
-	// RoundTrip succeeds for 5xx (it's a valid HTTP response), but the
-	// proxy should retry idempotent requests on another backend.
 	if resp.StatusCode >= 500 {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return BackendError{URL: destURL.String(), StatusCode: resp.StatusCode}
 	}
 
-	// Stream response headers and body back to the client.
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, err = io.Copy(w, resp.Body)
 	if err != nil {
-		// Headers are already committed (WriteHeader was called).
-		// The error is likely a client disconnect mid-stream.
-		// Return nil to prevent the caller from writing another HTTP error
-		// response on an already-committed ResponseWriter.
 		return nil
 	}
 
 	return nil
 }
 
-// selectDifferent picks a retry target from the healthy backends, excluding
-// the one that just failed. Instead of creating an ephemeral pool (which
-// would reset connection counters and break least-connections), this selects
-// directly from the existing ServerState pointers, preserving live state.
+// selectDifferent picks a retry target excluding the failed backend,
+// preferring the candidate with fewest active connections.
 func (lb *ReverseProxy) selectDifferent(backends []*repository.ServerState, exclude *url.URL, _ *http.Request) *url.URL {
 	var candidates []*repository.ServerState
 	for _, b := range backends {
@@ -303,9 +247,6 @@ func (lb *ReverseProxy) selectDifferent(backends []*repository.ServerState, excl
 		return nil
 	}
 
-	// Pick the candidate with the fewest active connections.
-	// This respects real counters for least-connections, and is a
-	// reasonable choice for round-robin/weighted as well.
 	best := candidates[0]
 	for _, c := range candidates[1:] {
 		if c.GetActiveConnections() < best.GetActiveConnections() {

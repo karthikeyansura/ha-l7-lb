@@ -1,51 +1,31 @@
-// Package repository defines the shared state abstraction for backend server
-// coordination across load balancer instances.
-//
-// The SharedState interface decouples routing algorithms and health checkers
-// from the underlying storage mechanism. The InMemory implementation provides
-// a single-process store, while Redis Pub/Sub synchronizes state mutations
-// across multiple LB instances for horizontal scaling (Experiment 3).
+// Package repository defines the shared state abstraction for backend
+// server coordination across load balancer instances.
 package repository
 
 import "net/url"
 
 // SharedState is the contract for all backend pool operations.
-// Every method must be safe for concurrent use by the proxy goroutines,
-// the health checker goroutine, and the Redis watcher goroutine.
+// All methods must be safe for concurrent use.
 type SharedState interface {
-	// GetAllServers returns a snapshot of every registered backend
-	// regardless of health status. Used by the health checker to
-	// probe all backends on each tick.
+	// GetAllServers returns all backends regardless of health status.
 	GetAllServers() ([]*ServerState, error)
 
 	// GetHealthy returns only backends where Healthy == true.
-	// Routing algorithms call this to exclude failed backends.
 	GetHealthy() ([]*ServerState, error)
 
 	// MarkHealthy sets the health flag for a specific backend.
-	// Called by the health checker (periodic) and by the proxy
-	// (on request failure, marking DOWN immediately rather than
-	// waiting for the next health check cycle).
 	MarkHealthy(backendURL url.URL, healthy bool)
 
-	// AddConnections atomically increments the active connection
-	// counter. Called before forwarding a request. The LeastConnections
-	// algorithm reads this counter to select the least-loaded backend.
+	// AddConnections increments the active connection counter.
 	AddConnections(serverURL url.URL, connections int64)
 
-	// RemoveConnections atomically decrements the active connection
-	// counter. Called after the proxied response completes or fails.
+	// RemoveConnections decrements the active connection counter.
 	RemoveConnections(serverURL url.URL, connections int64)
 
-	// SyncServers dynamically updates the backend pool. It adds new IPs discovered
-	// via DNS and removes IPs that no longer exist, while preserving the active
-	// connections and health status of existing servers.
+	// SyncServers reconciles the pool with newly discovered DNS IPs.
 	SyncServers(activeURLs []url.URL, defaultWeight int)
 
-	// SyncServersBySource reconciles the pool for a single DNS source.
-	// Only servers with a matching sourceTag are affected; other sources'
-	// servers are preserved. This enables multiple DNS watchers (e.g.,
-	// api-strong.internal and api-weak.internal) to coexist in one pool
-	// without overwriting each other.
+	// SyncServersBySource reconciles only the servers matching sourceTag,
+	// preserving other sources' servers.
 	SyncServersBySource(sourceTag string, activeURLs []url.URL, weight int)
 }

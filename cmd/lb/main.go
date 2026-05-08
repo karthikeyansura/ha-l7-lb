@@ -1,29 +1,8 @@
-// Load balancer entry point. Wires together all subsystems:
-//   - Configuration (YAML + env overrides)
-//   - Routing algorithm (selected by config policy field)
-//   - Shared state (InMemory pool)
-//   - Redis coordination (distributed health propagation)
-//   - Health checker (periodic active probes)
-//   - Metrics collector (latency, throughput, percentiles)
-//   - Reverse proxy (L7 forwarding with retry)
-//   - Metrics HTTP server (JSON/CSV endpoints on port+1000)
-//   - Graceful shutdown (drain connections + dump metrics on SIGTERM)
-//
-// Startup sequence:
-//  1. Load config (YAML + REDIS_ADDR env override).
-//  2. Parse base target URL and instantiate the routing algorithm.
-//  3. Create empty InMemory shared state.
-//  4. Start one DNS watcher per configured backend endpoint.
-//  5. Connect to Redis; if unavailable, degrade to local-only health mode.
-//  6. Sync local state from Redis (handles LB restart scenarios).
-//  7. Start periodic re-sync ticker (heals missed Pub/Sub events).
-//  8. Start Redis Pub/Sub watcher (background goroutine).
-//  9. Start health checker (background goroutine).
-//  10. Start metrics time-series recorder (every 5s, background goroutine).
-//  11. Start metrics HTTP server (port+1000, background goroutine).
-//  12. Register graceful shutdown handler (SIGINT/SIGTERM → drain connections
-//     with 10s timeout, then flush metrics to disk).
-//  13. Start the main HTTP server (foreground, blocks until exit).
+// Load balancer entry point. Wires configuration, routing algorithm, shared
+// state, Redis coordination, health checking, metrics collection, and the
+// L7 reverse proxy into a single process. A metrics HTTP server runs on
+// port+1000. Graceful shutdown on SIGTERM drains connections and flushes
+// metrics to disk (important for ECS task stop).
 package main
 
 import (
@@ -63,7 +42,6 @@ func main() {
 
 	route := config.AppConfig.Route
 
-	// Instantiate the routing algorithm from the policy string in config.
 	var policy algorithms.Rule
 	switch route.Policy {
 	case "round-robin":
@@ -84,16 +62,12 @@ func main() {
 		return
 	}
 
-	// Initialize with an empty pool; DNS watchers will populate it immediately.
 	sharedState := repository.NewInMemory([]url.URL{}, []int{})
 
-	// Cancellable context for all background goroutines — cancelled on SIGTERM/SIGINT.
 	ctx, cancelAll := context.WithCancel(context.Background())
 	defer cancelAll()
 
-	// Start one DNS watcher per configured backend endpoint.
-	// Each watcher resolves its hostname independently and syncs with its own
-	// weight, enabling heterogeneous backends (e.g., strong/weak) for weighted RR.
+	// Each DNS watcher resolves independently, enabling heterogeneous backends.
 	for _, backend := range route.Backends {
 		target, err := url.Parse(backend.Endpoint)
 		if err != nil {
@@ -104,8 +78,7 @@ func main() {
 		slog.Info("DNS watcher started", "hostname", target.Hostname(), "weight", backend.Weight)
 	}
 
-	// Redis is optional: if unavailable, the LB runs in degraded mode
-	// with local-only health state (no cross-instance sync).
+	// Redis is optional; if unavailable, health state is local-only (degraded mode).
 	var updater health.StatusUpdater
 	if config.AppConfig.RedisConfig != nil {
 		redisConf := config.AppConfig.RedisConfig
@@ -122,14 +95,10 @@ func main() {
 				}
 			}(redisMgr)
 
-			// Bootstrap local state from Redis (handles restarts where backends
-			// were already marked DOWN by other LB instances).
 			redisMgr.SyncOnStartUp()
 
-			// Periodic re-sync heals missed Pub/Sub messages.
 			redisMgr.StartPeriodicSync(ctx, 30*time.Second)
 
-			// Subscribe to Pub/Sub for real-time cross-instance health updates.
 			redisMgr.StartRedisWatcher(ctx)
 
 			updater = redisMgr
@@ -140,8 +109,7 @@ func main() {
 
 	collector := metrics.NewCollector(route.Policy)
 
-	// Construct the reverse proxy. updater may be nil in degraded mode;
-	// the proxy already nil-checks before calling it.
+	// updater may be nil in degraded mode; the proxy nil-checks before use.
 	lb := proxy.NewReverseProxy(
 		sharedState,
 		policy,
@@ -152,8 +120,6 @@ func main() {
 	)
 	slog.Info("Proxy constructed", "retries_enabled", config.AppConfig.LoadBalancer.RetriesEnabled)
 
-	// Health checker: periodic /health GETs against all backends.
-	// In degraded mode, updater is nil — checker will update local state only.
 	checker := health.NewChecker(
 		sharedState,
 		updater,
@@ -162,10 +128,8 @@ func main() {
 	)
 	checker.Start(ctx)
 
-	// Metrics HTTP server on port+1000 (e.g., 9080 if LB is on 8080).
 	metricsServer := startMetricsServer(collector, sharedState, config.AppConfig.LoadBalancer.Port+1000)
 
-	// Time-series recorder: captures RPS and avg latency every 5 seconds.
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -181,7 +145,6 @@ func main() {
 		}
 	}()
 
-	// Construct the listening address from config
 	addr := fmt.Sprintf(":%d", config.AppConfig.LoadBalancer.Port)
 
 	server := &http.Server{Addr: addr, Handler: lb}
@@ -199,11 +162,8 @@ func main() {
 	<-done
 }
 
-// startMetricsServer runs an HTTP server exposing operational endpoints:
-//   - GET /metrics: JSON summary (total requests, percentiles, per-backend stats).
-//   - GET /metrics/timeseries: JSON array of periodic time-series snapshots.
-//   - GET /metrics/export: CSV download of time-series data.
-//   - GET /health/backends: current health status of all registered backends.
+// startMetricsServer exposes /metrics, /metrics/timeseries, /metrics/export,
+// and /health/backends on the given port.
 func startMetricsServer(collector *metrics.Collector, pool repository.SharedState, port int) *http.Server {
 	mux := http.NewServeMux()
 
@@ -270,9 +230,8 @@ func startMetricsServer(collector *metrics.Collector, pool repository.SharedStat
 	return srv
 }
 
-// setupGracefulShutdown intercepts SIGINT and SIGTERM to persist metrics
-// before exit. ECS sends SIGTERM on task stop; this ensures experiment
-// data is not lost when scaling down LB instances.
+// setupGracefulShutdown intercepts SIGINT/SIGTERM to drain connections
+// and flush metrics before exit (ECS sends SIGTERM on task stop).
 func setupGracefulShutdown(
 	collector *metrics.Collector,
 	outputFile string,
@@ -288,11 +247,8 @@ func setupGracefulShutdown(
 		<-c
 		slog.Info("Shutting down gracefully...")
 
-		// Cancel all background goroutines (health checker, DNS watcher,
-		// Redis watcher, time-series recorder, periodic sync).
 		cancelAll()
 
-		// Drain in-flight HTTP connections (10s timeout).
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {

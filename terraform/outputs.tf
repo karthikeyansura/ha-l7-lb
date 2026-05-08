@@ -1,5 +1,3 @@
-# The NLB DNS name is the client entry point for all experiments.
-# Point Locust's host field at this value.
 output "nlb_dns_name" {
   description = "DNS name of the Network Load Balancer."
   value       = module.nlb.nlb_dns_name
@@ -18,8 +16,6 @@ output "backend_cluster_name" {
   value = module.ecs_backend.cluster_name
 }
 
-# Locust load generator — drive runs via `aws ssm send-command --instance-ids`
-# and pull artifacts from the results bucket.
 output "locust_instance_id" {
   description = "EC2 id for the Locust load generator. Use with aws ssm send-command."
   value       = module.locust.instance_id

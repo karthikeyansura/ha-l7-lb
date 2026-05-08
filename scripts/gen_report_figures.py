@@ -47,9 +47,7 @@ def _backend_split(metrics_json: Path) -> tuple[int, int]:
     return counts[0], counts[1] if len(counts) > 1 else 0
 
 
-# -----------------------------------------------------------------------------
 # Figure 1: heterogeneous distribution across RR / LC / Weighted
-# -----------------------------------------------------------------------------
 def fig_hetero_distribution() -> None:
     algos = ["Round-Robin", "Least-Connections", "Weighted (70/30)"]
     runs = ["hetero_rr_stress_u20", "hetero_lc_stress_u20", "hetero_weighted_stress_u20"]
@@ -104,9 +102,7 @@ def fig_hetero_distribution() -> None:
     print("  ok: hetero_distribution.png")
 
 
-# -----------------------------------------------------------------------------
 # Figure 2: retry on/off inversion — Part A (broad chaos) vs Part B (replica drop)
-# -----------------------------------------------------------------------------
 def fig_retry_flip() -> None:
     part_a_on = _aggregated_row(
         RESULTS / "exp2a_low_chaos" / "retry_on_200" / "stats.csv"
@@ -177,9 +173,7 @@ def fig_retry_flip() -> None:
     print("  ok: retry_flip.png")
 
 
-# -----------------------------------------------------------------------------
 # Figure 3: /api/data scaling curve (RPS vs lb_count at u=500 and u=2000)
-# -----------------------------------------------------------------------------
 def fig_scaling_data() -> None:
     lb_counts = [1, 2, 4, 8]
     u500_rps, u2000_rps = [], []

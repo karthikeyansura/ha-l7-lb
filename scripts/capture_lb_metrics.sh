@@ -1,18 +1,8 @@
 #!/usr/bin/env bash
-# Snapshot LB metrics and backend health during a run.
+# Snapshot LB /metrics and /health/backends from each ECS task via SSM
+# and upload to S3. Call mid-run or post-run.
 #
-# Runs a curl script on the Locust EC2 (same VPC as LB tasks), pulling
-# /metrics and /health/backends from EACH LB ECS task, then uploads the
-# collected JSON to S3 and echoes a short summary.
-#
-# Usage:
-#   ./scripts/capture_lb_metrics.sh <run_id>
-#
-# Example:
-#   ./scripts/capture_lb_metrics.sh exp1/weighted_hetero_500u
-#
-# Call mid-run (to see active state) or post-run (pre-destroy) to capture
-# per-backend request distribution.
+# Usage: ./scripts/capture_lb_metrics.sh <run_id>
 
 set -euo pipefail
 
@@ -26,14 +16,7 @@ LB_CLUSTER=$(terraform output -raw lb_cluster_name)
 
 S3_PREFIX="s3://${BUCKET}/${RUN_ID}"
 
-# Shell script runs on the Locust EC2; it enumerates LB tasks and curls
-# each. ECS task IPs come from `aws ecs describe-tasks` via the instance
-# profile (SSMManaged + s3 is granted, but ECS describe is not — so we
-# need to temporarily add permission OR drive the enumeration from the
-# local machine).
-#
-# Safer path: drive enumeration locally (we have AWS creds); send a
-# single per-IP curl script to the EC2.
+# Enumerate LB task IPs from ECS.
 
 TASK_ARNS=$(aws ecs list-tasks \
   --cluster "$LB_CLUSTER" \

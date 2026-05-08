@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Rebuild the ha-l7-lb-ops CloudWatch dashboard after terraform destroy.
-# CloudWatch dashboards are free; the underlying ECS/ElastiCache/NLB metrics
-# are retained for 15 days regardless of whether source resources still exist.
-# This lets us capture per-run dashboards for runs that finished before the
-# teardown.
-#
+# Rebuild the CloudWatch dashboard after terraform destroy. Metrics are
+# retained 15 days regardless of source resource lifecycle.
 # Usage: ./scripts/rebuild_dashboard.sh
 set -euo pipefail
 

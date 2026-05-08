@@ -12,26 +12,18 @@ import (
 )
 
 // Checker performs periodic active health checks against all registered
-// backends by sending HTTP GET requests to their /health endpoint.
-//
-// On each tick, checkAll launches one goroutine per backend for concurrent
-// probing. Only state transitions (healthy -> unhealthy or vice versa) are
-// reported to the StatusUpdater to avoid redundant Redis writes.
-//
-// The Checker uses a concrete *InMemory rather than the SharedState
-// interface because it needs GetAllServers (including unhealthy backends)
-// to detect recovery, and the InMemory type is always the local store.
+// backends via HTTP GET to /health. Only state transitions are reported
+// to the StatusUpdater to avoid redundant writes.
 type Checker struct {
 	pool     *repository.InMemory
-	updater  StatusUpdater // Typically RedisManager; propagates changes to all LB instances.
-	interval time.Duration // Time between full probe cycles.
-	timeout  time.Duration // HTTP client timeout for each /health request.
+	updater  StatusUpdater
+	interval time.Duration
+	timeout  time.Duration
 	client   *http.Client
 	checking atomic.Bool
 }
 
-// NewChecker constructs a Checker. The interval and timeout are read from
-// config.yaml's health_check section.
+// NewChecker constructs a Checker with the given probe interval and timeout.
 func NewChecker(pool *repository.InMemory, updater StatusUpdater, interval, timeout time.Duration) *Checker {
 	return &Checker{
 		pool:     pool,
@@ -49,11 +41,8 @@ func NewChecker(pool *repository.InMemory, updater StatusUpdater, interval, time
 	}
 }
 
-// Start runs an initial health check immediately, then launches a
-// background goroutine that repeats on a fixed interval.
-// The goroutine exits when ctx is cancelled. This method does not block.
+// Start runs an initial check, then repeats on a fixed interval until ctx is cancelled.
 func (hc *Checker) Start(ctx context.Context) {
-	// Immediate first check so backends are validated before traffic arrives.
 	hc.checkAll()
 	go func() {
 		ticker := time.NewTicker(hc.interval)
@@ -72,8 +61,6 @@ func (hc *Checker) Start(ctx context.Context) {
 }
 
 // checkAll probes every registered backend concurrently.
-// Each probe runs in its own goroutine to avoid a single slow backend
-// delaying the entire cycle.
 func (hc *Checker) checkAll() {
 	if !hc.checking.CompareAndSwap(false, true) {
 		return // previous wave still running — skip to prevent overlap
@@ -96,16 +83,9 @@ func (hc *Checker) checkAll() {
 	wg.Wait()
 }
 
-// checkBackend performs a single HTTP GET to {backend}/health.
-// A backend is considered healthy if and only if the response status is 200 OK
-// within the configured timeout. Any other outcome (error, non-200 status,
-// timeout) marks the backend as DOWN.
-//
-// Draining backends are skipped entirely: they are already marked unhealthy
-// and are waiting for in-flight connections to complete before removal.
-//
-// State changes only: if the probed status matches the current Healthy flag,
-// no update is published. This minimizes Redis write frequency.
+// checkBackend probes a single backend's /health endpoint. A 200 OK within
+// the timeout is considered healthy; any other outcome marks it DOWN.
+// Draining backends are skipped.
 func (hc *Checker) checkBackend(backend *repository.ServerState) {
 	if backend.IsDraining() {
 		return
@@ -115,7 +95,6 @@ func (hc *Checker) checkBackend(backend *repository.ServerState) {
 
 	var isHealthy bool
 	if err != nil {
-		// Connection refused, DNS failure, timeout — treat as unhealthy.
 		isHealthy = false
 	} else {
 		defer func() {
@@ -129,14 +108,11 @@ func (hc *Checker) checkBackend(backend *repository.ServerState) {
 		newStatus = "UP"
 	}
 
-	// Update only on state transition.
 	if backend.IsHealthy() != isHealthy {
 		slog.Info("Health Check", "backend", backend.ServerURL, "status", newStatus)
 
-		// Always update local state.
 		hc.pool.MarkHealthy(backend.ServerURL, isHealthy)
 
-		// Propagate to other LB instances via Redis if available.
 		if hc.updater != nil {
 			if err := hc.updater.UpdateBackendStatus(backend.ServerURL, newStatus); err != nil {
 				slog.Error("Failed to update state", "backend", backend.ServerURL, "error", err)

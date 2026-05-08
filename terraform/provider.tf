@@ -1,6 +1,5 @@
-# Provider configuration for AWS and Docker.
-# The Docker provider authenticates against ECR to build and push images
-# as part of `terraform apply`, eliminating manual `docker push` steps.
+# Provider configuration. Docker provider authenticates against ECR for
+# build-and-push during terraform apply.
 terraform {
   required_providers {
     aws = {

@@ -1,15 +1,7 @@
 // Package redismanager provides distributed state coordination for
-// horizontally scaled L7 load balancer instances.
-//
-// When one LB instance detects a backend failure (via health check or
-// proxy timeout), it writes the new status to Redis and publishes a
-// notification on a Pub/Sub channel. All other LB instances subscribe
-// to this channel and update their local InMemory state immediately,
-// eliminating the delay of waiting for their own health check cycle.
-//
-// This is the core mechanism enabling Experiment 3 (horizontal LB scaling):
-// without it, each LB instance would have an independent, potentially
-// inconsistent view of backend health.
+// horizontally scaled LB instances via Redis SET/GET and Pub/Sub.
+// Enables real-time cross-instance health propagation so backends
+// marked DOWN by one LB are immediately visible to all others.
 package redismanager
 
 import (
@@ -26,39 +18,21 @@ import (
 )
 
 const (
-	// PubSubChannel is the Redis channel name for health state change events.
-	// Message format: "URL|STATUS" where STATUS is "UP" or "DOWN".
-	PubSubChannel = "lb-backend-events"
-
-	// KeyPrefix namespaces Redis keys to avoid collisions.
-	// Each backend has a key like "backend:http://host:port" storing "UP"/"DOWN".
-	KeyPrefix = "backend:"
+	PubSubChannel = "lb-backend-events" // Message format: "URL|STATUS"
+	KeyPrefix     = "backend:"           // Per-backend health key namespace.
 )
 
-// RedisManager coordinates backend health state across LB instances.
-// It implements the health.StatusUpdater interface, allowing the health
-// checker and proxy to publish state changes without knowing about Redis.
-//
-// The client field uses redis.UniversalClient (not ClusterClient) to
-// support both single-node Redis (AWS ElastiCache with 1 node) and
-// Redis Cluster (3+ nodes) without code changes. The constructor
-// auto-detects based on whether the addr string contains commas.
+// RedisManager coordinates health state across LB instances. Uses
+// redis.UniversalClient to support both single-node and cluster mode.
 type RedisManager struct {
 	client redis.UniversalClient
 	pool   repository.SharedState
 }
 
-// NewRedisManager establishes a Redis connection and verifies reachability
-// via PING with a 5-second timeout. Returns an error if Redis is unreachable;
-// the caller decides how to handle it (currently: degrade to local-only health).
-//
-// Auto-detection logic: if addr contains commas (e.g., "host1:6379,host2:6379"),
-// a ClusterClient is created. Otherwise, a single-node Client is used.
-// This matters because AWS ElastiCache with num_cache_nodes=1 is not a cluster.
+// NewRedisManager connects to Redis, auto-detecting single-node vs. cluster
+// mode by comma presence in addr. Returns error if PING fails.
 func NewRedisManager(addr, password string, db int, pool repository.SharedState) (*RedisManager, error) {
 	addrs := strings.Split(addr, ",")
-
-	// Single-node vs. cluster auto-detection based on address count.
 	var client redis.UniversalClient
 	if len(addrs) > 1 {
 		client = redis.NewClusterClient(&redis.ClusterOptions{
@@ -87,16 +61,8 @@ func NewRedisManager(addr, password string, db int, pool repository.SharedState)
 	}, nil
 }
 
-// UpdateBackendStatus persists a backend's health state to Redis and
-// broadcasts it to all LB instances via Pub/Sub.
-//
-// This is a two-phase write:
-//  1. SET the key so that newly starting LB instances can read it (SyncOnStartUp).
-//  2. PUBLISH to the channel so already-running instances learn immediately.
-//
-// The 2-second context timeout prevents a slow Redis from blocking the
-// proxy goroutine indefinitely. If Redis is unreachable, the local state
-// has already been updated; only cross-instance propagation is lost.
+// UpdateBackendStatus persists a backend's health to Redis (SET) and
+// broadcasts it via Pub/Sub. A 2s timeout prevents blocking the proxy.
 func (rm *RedisManager) UpdateBackendStatus(backendURL url.URL, status string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -104,27 +70,18 @@ func (rm *RedisManager) UpdateBackendStatus(backendURL url.URL, status string) e
 	urlStr := backendURL.String()
 	key := KeyPrefix + urlStr
 
-	// Phase 1: persist to key for startup-time reads.
 	err := rm.client.Set(ctx, key, status, 0).Err()
 	if err != nil {
 		return err
 	}
 
-	// Phase 2: broadcast for real-time propagation.
 	message := fmt.Sprintf("%s|%s", urlStr, status)
 	return rm.client.Publish(ctx, PubSubChannel, message).Err()
 }
 
-// SyncOnStartUp reads the current health state from Redis for every
-// configured backend and applies it to the local InMemory pool.
-//
-// This handles the case where an LB instance starts (or restarts) while
-// backends are already marked DOWN by other instances. Without this,
-// the new instance would assume all backends are healthy and route
-// traffic to failed servers until its own health checks catch up.
-//
-// If a backend has no key in Redis (first-ever deployment), it writes
-// "UP" as the default, establishing the initial shared state.
+// SyncOnStartUp reads health state from Redis for every backend and
+// applies it locally. Handles LB restarts where backends were already
+// marked DOWN by other instances.
 func (rm *RedisManager) SyncOnStartUp() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -142,14 +99,12 @@ func (rm *RedisManager) SyncOnStartUp() {
 			rm.pool.MarkHealthy(backend.ServerURL, healthy)
 			slog.Info(fmt.Sprintf("Synced %s from Redis: %v", backend.ServerURL.String(), healthy))
 		} else if errors.Is(err, redis.Nil) {
-			// Key does not exist (first deployment); initialize as UP.
 			if err := rm.UpdateBackendStatus(backend.ServerURL, "UP"); err != nil {
 				slog.Error("Failed to initialize backend state in Redis",
 					"backend", backend.ServerURL.String(),
 					"error", err)
 			}
 		} else {
-			// Network error or other Redis failure — skip to prevent state corruption.
 			slog.Error("Redis error during sync, skipping backend",
 				"backend", backend.ServerURL.String(),
 				"error", err)
@@ -157,9 +112,7 @@ func (rm *RedisManager) SyncOnStartUp() {
 	}
 }
 
-// StartPeriodicSync runs SyncOnStartUp on a background ticker to heal
-// any state divergence caused by missed Pub/Sub messages. This enforces
-// eventual consistency without relying solely on fire-and-forget Pub/Sub.
+// StartPeriodicSync runs SyncOnStartUp on a ticker to heal state divergence.
 func (rm *RedisManager) StartPeriodicSync(ctx context.Context, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -175,16 +128,9 @@ func (rm *RedisManager) StartPeriodicSync(ctx context.Context, interval time.Dur
 	}()
 }
 
-// StartRedisWatcher launches a background goroutine that subscribes to
-// the Pub/Sub channel and applies incoming health state changes to
-// the local InMemory pool.
-//
-// Message format is "URL|STATUS" (e.g., "http://backend-1:8080|DOWN").
-// Malformed messages (wrong number of pipe-separated fields) are silently
-// dropped. URL parse failures are logged and skipped.
-//
-// This goroutine runs for the lifetime of the process. If the Redis
-// connection drops, the go-redis library automatically reconnects.
+// StartRedisWatcher subscribes to the Pub/Sub channel and applies
+// incoming health state changes to the local pool. Runs for the
+// lifetime of the process; go-redis handles automatic reconnection.
 func (rm *RedisManager) StartRedisWatcher(ctx context.Context) {
 	go func() {
 		sub := rm.client.Subscribe(ctx, PubSubChannel)
@@ -224,7 +170,7 @@ func (rm *RedisManager) StartRedisWatcher(ctx context.Context) {
 	}()
 }
 
-// Close terminates the Redis client connection.
+// Close terminates the Redis connection.
 func (rm *RedisManager) Close() error {
 	return rm.client.Close()
 }

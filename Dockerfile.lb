@@ -1,7 +1,4 @@
-# Multi-stage build for the load balancer binary.
-# Stage 1: compile a statically linked Go binary.
-# Stage 2: copy into a minimal Alpine image for small container size.
-# Exposes 8080 (LB traffic) and 9080 (metrics server at port+1000).
+# Multi-stage build for the load balancer. Exposes 8080 (LB) and 9080 (metrics).
 FROM golang:1.25-alpine AS build
 RUN apk add --no-cache git
 

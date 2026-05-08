@@ -1,20 +1,8 @@
 #!/usr/bin/env bash
-# Drive a single Locust run on the AWS-hosted load generator via SSM.
+# Run a headless Locust test on the AWS EC2 load generator via SSM.
 #
-# Usage:
-#   ./scripts/run_locust.sh <run_id> <user_class> <users> <duration_min> [spawn_rate]
-#
-# Examples:
-#   ./scripts/run_locust.sh exp1/weighted_hetero_500u AlgorithmCompareUser 500 5
-#   ./scripts/run_locust.sh exp2/retry_on_100u       ChaosInjectionUser   100 5
-#   ./scripts/run_locust.sh exp3/lb1_2000u_spike     ScalingSpikeUser     2000 3
-#
-# Assumes terraform outputs are populated and Locust EC2 has been
-# bootstrapped (locust in /usr/local/bin, locustfile at /opt/locust/).
-#
-# Uses aws ssm send-command --cli-input-json (via a generated JSON payload)
-# so multi-line shell commands preserve real newlines. The AWS CLI's
-# shorthand --parameters syntax collapses escapes and mangles heredocs.
+# Usage: ./scripts/run_locust.sh <run_id> <user_class> <users> <duration_min> [spawn_rate]
+# Example: ./scripts/run_locust.sh exp1/weighted_hetero_500u AlgorithmCompareUser 500 5
 
 set -euo pipefail
 
@@ -37,10 +25,8 @@ S3_PREFIX="s3://${BUCKET}/${RUN_ID}"
 
 echo "[run_locust] $RUN_ID -> nlb=$NLB_DNS users=$USERS rate=$SPAWN_RATE dur=${DURATION_MIN}m"
 
-# Compose the shell script that will run on the EC2.
-# Locust can exit non-zero under chaos (failures ARE the Exp 2 signal).
-# Treat locust failure as soft — still upload artifacts if they exist.
-# Fail hard only if locust didn't produce any CSVs at all.
+# Compose the remote script. Locust may exit non-zero under chaos;
+# treat as soft failure and still upload artifacts.
 read -r -d '' CMD <<EOF || true
 set -uo pipefail
 cd /opt/locust
@@ -60,7 +46,7 @@ aws s3 cp run-${RUN_SLUG}_failures.csv      ${S3_PREFIX}/failures.csv || true
 aws s3 cp run-${RUN_SLUG}.html              ${S3_PREFIX}/report.html || true
 EOF
 
-# Build the SSM payload using jq so newlines are correctly JSON-escaped.
+# Build SSM payload via jq for correct JSON newline escaping.
 PAYLOAD=$(mktemp /tmp/ssm-run-XXXXXX.json)
 trap "rm -f $PAYLOAD" EXIT
 
@@ -81,7 +67,7 @@ CMD_ID=$(aws ssm send-command --cli-input-json "file://$PAYLOAD" --query "Comman
 echo "[run_locust] SSM command id: $CMD_ID"
 echo "[run_locust] polling every 10s..."
 
-# Run should take ${DURATION_MIN} minutes + ramp + upload.
+# Poll SSM until completion.
 MAX_WAIT=$((DURATION_MIN * 6 + 30))
 for _ in $(seq 1 "$MAX_WAIT"); do
   STATUS=$(aws ssm list-command-invocations \

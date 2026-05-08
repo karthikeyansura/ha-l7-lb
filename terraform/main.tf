@@ -1,9 +1,6 @@
-# Root module: composes all infrastructure from focused sub-modules.
-#
-# Architecture:
-#   Client -> NLB (L4, TCP) -> LB ECS tasks (L7, custom proxy) -> Backend ECS tasks
-#                                    |
-#                              ElastiCache Redis (state coordination)
+# Root module: Client -> NLB (L4) -> LB ECS (L7) -> Backend ECS
+#                                       |
+#                                 ElastiCache Redis
 
 module "network" {
   source         = "./modules/network"
@@ -48,18 +45,14 @@ module "nlb" {
   lb_port      = var.lb_port
 }
 
-# Private DNS namespace for backend service discovery.
+# Private DNS for backend service discovery.
 resource "aws_service_discovery_private_dns_namespace" "internal" {
   name        = "internal"
   description = "Private DNS for HA L7 LB backend discovery"
   vpc         = module.network.vpc_id
 }
 
-# --- Homogeneous Backend (Exp 2/3 baseline) ---
-#
-# Single Cloud Map service, single ECS cluster of identical backends.
-# For dual-tier (weighted heterogeneous) experiments, swap back to the
-# dual-tier block in git history (commit cccea8c on exp/1-weighted-hetero).
+# Homogeneous backend (Exp 2/3 baseline).
 
 resource "aws_service_discovery_service" "backend" {
   name = "api"
@@ -98,7 +91,7 @@ module "autoscaling_backend" {
   cpu_target_value = var.cpu_target_value
 }
 
-# --- Load Balancer ---
+# Load Balancer
 
 module "ecs_lb" {
   source             = "./modules/ecs-lb"
@@ -118,13 +111,8 @@ module "ecs_lb" {
   depends_on         = [docker_registry_image.lb]
 }
 
-# --- Docker Builds ---
-#
-# Docker images rebuild when ANY tracked source file changes. Without a
-# trigger, the docker provider only notices name/path changes, so
-# changing config.yaml or *.go code silently uses the cached image on
-# the next apply. The triggers hash the build context so content
-# changes force a fresh build and ECR push.
+# Docker Builds
+# Triggers force rebuild when source files change.
 
 locals {
   lb_build_hash = sha1(join("", [
@@ -177,10 +165,7 @@ resource "docker_registry_image" "backend" {
   triggers = { src_hash = local.backend_build_hash }
 }
 
-# --- Locust Load Generator ---
-#
-# Single EC2 in the default VPC that runs Locust in headless mode.
-# Driven remotely via `aws ssm send-command`; results land in S3.
+# Locust Load Generator (EC2, driven via SSM)
 
 module "locust" {
   source               = "./modules/locust"
