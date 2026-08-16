@@ -1,6 +1,4 @@
-# HA-L7-LB
-
-High-Availability Layer 7 Load Balancer with Distributed State Coordination.
+# High-Availability Layer 7 Load Balancer
 
 Custom L7 reverse proxy in Go with pluggable routing algorithms, active health checking, idempotent-method retry logic with a 20% retry budget, and Redis Pub/Sub coordination across horizontally scaled LB instances. Deployed on AWS ECS Fargate via Terraform (NLB, ElastiCache, Cloud Map discovery). Empirical results and full methodology are documented in `docs/final_report.md`; artifacts live under `results/`.
 
